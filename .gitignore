@@ -1,0 +1,19 @@
+# Python
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+
+# Local env / venv (never commit)
+api/venv/
+venv/
+
+# Logs & pids
+api/api.log
+api/api.pid
+
+# Local media (dev only)
+api/media/
+
+# OS
+.DS_Store
+
