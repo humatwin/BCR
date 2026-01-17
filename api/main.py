@@ -1,0 +1,1439 @@
+"""
+BCR API - Version qui FONCTIONNE avec les vraies données
+Utilise les URLs directes pour chaque catégorie
+"""
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from typing import List, Optional
+import httpx
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+import re
+import urllib.parse
+import os
+import json
+import uuid
+from media_storage import build_media_storage
+
+app = FastAPI(title="BCR API", version="3.0.0")
+
+# --- Production-friendly config (via env vars) ---
+# Platforms like Render/Fly/Railway inject PORT; we use it in Docker CMD.
+# CORS is mostly useful for web frontends; iOS is not affected by CORS.
+def _parse_csv_env(name: str, default: str = "") -> List[str]:
+    raw = (os.getenv(name) or default).strip()
+    if not raw:
+        return []
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+_cors_origins = _parse_csv_env("BCR_CORS_ORIGINS", "*") or ["*"]
+_cors_allow_credentials = (os.getenv("BCR_CORS_ALLOW_CREDENTIALS") or "false").strip().lower() == "true"
+# Starlette disallows allow_credentials=True with wildcard origins; keep it safe by forcing false.
+if _cors_origins == ["*"] and _cors_allow_credentials:
+    _cors_allow_credentials = False
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Media storage (for "media" account uploads)
+BASE_DIR = os.path.dirname(__file__)
+MEDIA_ROOT = os.getenv("BCR_MEDIA_ROOT") or os.path.join(BASE_DIR, "media")
+MEDIA_PHOTOS_DIR = os.path.join(MEDIA_ROOT, "photos")
+MEDIA_AVATARS_DIR = os.path.join(MEDIA_ROOT, "avatars")
+
+os.makedirs(MEDIA_PHOTOS_DIR, exist_ok=True)
+os.makedirs(MEDIA_AVATARS_DIR, exist_ok=True)
+
+MEDIA_STORAGE = build_media_storage(MEDIA_ROOT)
+# Only mount static files when using local storage. On Render free, disk is ephemeral anyway.
+if (os.getenv("BCR_MEDIA_BACKEND") or "local").strip().lower() != "s3":
+    app.mount("/media-files", StaticFiles(directory=MEDIA_ROOT), name="media-files")
+
+# Modèles
+class RankingEntry(BaseModel):
+    rank: int
+    player_name: str
+    points: float
+    province: Optional[str] = None
+    previous_rank: Optional[int] = None
+    player_id: Optional[str] = None
+
+class RankingResponse(BaseModel):
+    category: str
+    scope: str
+    last_updated: str
+    rankings: List[RankingEntry]
+    total_count: int
+
+class NewsItem(BaseModel):
+    id: str
+    title: str
+    url: str
+    image_url: Optional[str] = None
+    excerpt: Optional[str] = None
+    published: Optional[str] = None
+
+class NewsResponse(BaseModel):
+    source: str
+    last_updated: str
+    items: List[NewsItem]
+    total_count: int
+
+class MediaPhoto(BaseModel):
+    id: str
+    user_id: str
+    file_name: str
+    created_at: str
+    added_by: str
+    added_by_id: Optional[str] = None
+    image_url: Optional[str] = None
+
+# Cache simple
+cache = {}
+CACHE_DURATION = timedelta(hours=1)
+ABC_URL = "https://www.badmintonquebec.com/classement-elite-abc-2025-2026"
+BADMINTON_CANADA_HOME = "https://www.badminton.ca"
+BADMINTON_CANADA_NEWS_FEED = "https://www.badminton.ca/newsfeed/0/"
+
+# Simple FR/EN scoring to keep only French news in /news
+_FR_TOKENS = {
+    "demande", "proposition", "dp", "défi", "defi", "conclusion",
+    "remporte", "étoile", "etoile", "montante", "année", "annee",
+    "intronisée", "intronisee", "temple", "renommée", "renommee",
+    "résultats", "resultats", "championnats", "panaméricains", "panamericains",
+    "para-badminton", "para"
+}
+_EN_TOKENS = {
+    "request", "proposal", "rfp", "wins", "wrap", "results", "canadians",
+    "championships", "inducted", "into", "hall", "fame"
+}
+
+def _media_player_dir(player_id: str) -> str:
+    pid = str(player_id).strip()
+    return os.path.join(MEDIA_PHOTOS_DIR, pid)
+
+def _media_photos_meta_path(player_id: str) -> str:
+    return os.path.join(_media_player_dir(player_id), "photos.json")
+
+def _load_media_photos(player_id: str) -> List[dict]:
+    meta_path = _media_photos_meta_path(player_id)
+    if not os.path.exists(meta_path):
+        return []
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            return json.load(f) or []
+    except Exception:
+        return []
+
+def _save_media_photos(player_id: str, items: List[dict]) -> None:
+    pdir = _media_player_dir(player_id)
+    os.makedirs(pdir, exist_ok=True)
+    meta_path = _media_photos_meta_path(player_id)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False)
+
+def _lang_score(text: str) -> tuple[int, int, bool]:
+    """Return (fr_score, en_score, has_accents)."""
+    if not text:
+        return (0, 0, False)
+    t = text.lower().strip()
+    has_accents = bool(re.search(r"[àâäçéèêëîïôöùûüÿœæ]", t))
+    tokens = re.findall(r"[a-zà-ÿ]+(?:'[a-zà-ÿ]+)?", t, flags=re.IGNORECASE)
+    token_set = set(tokens)
+
+    fr = sum(1 for w in _FR_TOKENS if w.lower().replace("é", "e") in token_set or w in token_set)
+    en = sum(1 for w in _EN_TOKENS if w in token_set)
+
+    # Boost for strong multi-word English phrase
+    if "hall of fame" in t:
+        en += 3
+    if "has been" in t:
+        en += 1
+
+    return (fr, en, has_accents)
+
+def _is_likely_french(text: str) -> bool:
+    fr, en, accents = _lang_score(text)
+    return accents or (fr > en)
+
+# URLs directes pour chaque catégorie
+CATEGORY_URLS = {
+    "MS": "https://badmintoncanada.tournamentsoftware.com/ranking/category.aspx?id=49797&category=151",
+    "WS": "https://badmintoncanada.tournamentsoftware.com/ranking/category.aspx?id=49797&category=152",
+    "MD": "https://badmintoncanada.tournamentsoftware.com/ranking/category.aspx?id=49797&category=153",
+    "WD": "https://badmintoncanada.tournamentsoftware.com/ranking/category.aspx?id=49797&category=154",
+    "XD": "https://badmintoncanada.tournamentsoftware.com/ranking/category.aspx?id=49797&category=155"
+}
+
+RANKING_LIST_ID = "49797"
+
+async def scrape_rankings(category: str) -> List[RankingEntry]:
+    """Scrape les rankings pour une catégorie"""
+    
+    url = CATEGORY_URLS.get(category, CATEGORY_URLS["MS"])
+    
+    print(f"🌐 Scraping: {url}")
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        table = soup.find('table')
+        
+        if not table:
+            print("❌ Aucune table trouvée")
+            return []
+        
+        rows = table.find_all('tr')
+        print(f"📊 {len(rows)} lignes dans la table")
+        
+        rankings = []
+        
+        # Skipper les 2 premières lignes (titre + en-têtes)
+        for row in rows[2:]:
+            cells = row.find_all(['td', 'th'])
+            
+            if len(cells) < 3:
+                continue
+            
+            cell_texts = [c.get_text(strip=True) for c in cells]
+
+            # Extract player_id from anchor href like: player.aspx?id=49797&player=3484563
+            player_id = None
+            try:
+                a = row.find("a", href=True)
+                if a:
+                    href = a.get("href", "")
+                    m = re.search(r"[?&]player=(\d+)", href)
+                    if m:
+                        player_id = m.group(1)
+            except Exception:
+                player_id = None
+            
+            # Trouver rang (premier nombre < 1000)
+            rank = None
+            for text in cell_texts:
+                if text.isdigit() and 1 <= int(text) < 1000:
+                    rank = int(text)
+                    break
+            
+            # Trouver nom (première chaîne qui ressemble à un nom)
+            player_name = None
+            for text in cell_texts:
+                if (len(text) > 2 and 
+                    not text.replace('.', '').replace(',', '').isdigit() and 
+                    not re.match(r'^[A-Z]{2}\d+$', text)):  # Pas un ID comme "ON13010"
+                    
+                    # Vérifier que c'est un nom (contient espace OU caractères alphabétiques > 50%)
+                    alpha_count = sum(c.isalpha() or c.isspace() for c in text)
+                    if alpha_count > len(text) * 0.5:
+                        player_name = text
+                        break
+            
+            # Trouver points (nombre >= 1000)
+            points = 0.0
+            for text in cell_texts:
+                clean = text.replace(',', '').strip()
+                if clean.isdigit():
+                    val = int(clean)
+                    if val >= 1000:
+                        points = float(val)
+                        break
+            
+            # Ajouter si valide
+            if rank and player_name:
+                rankings.append(RankingEntry(
+                    rank=rank,
+                    player_name=player_name,
+                    points=points,
+                    province="ON",  # TODO: extraire de la table
+                    previous_rank=None,
+                    player_id=player_id
+                ))
+        
+        print(f"✅ {len(rankings)} joueurs extraits")
+        if rankings:
+            print(f"   1er: {rankings[0].player_name}")
+        
+        return rankings
+    
+    except Exception as e:
+        print(f"❌ Erreur de scraping: {e}")
+        return []
+
+
+class PlayerRankingItem(BaseModel):
+    category_code: str
+    category_name: str
+    rank: int
+    points: float
+    partner_name: Optional[str] = None
+    partner_player_id: Optional[str] = None
+
+class PlayerProfileResponse(BaseModel):
+    player_id: str
+    full_name: str
+    member_id: Optional[str] = None
+    province: Optional[str] = None
+    profile_url: str
+    rankings: List[PlayerRankingItem]
+    last_updated: str
+
+
+class PlayerSearchResult(BaseModel):
+    player_id: str
+    full_name: str
+    member_id: Optional[str] = None
+    province: Optional[str] = None
+
+class ABCCalendarEvent(BaseModel):
+    id: str
+    title: str
+    subtitle: Optional[str] = None
+    start_ts: int
+    end_ts: int
+    start: str
+    end: str
+    url: Optional[str] = None
+    image_url: Optional[str] = None
+
+class ABCCalendarResponse(BaseModel):
+    source: str
+    last_updated: str
+    events: List[ABCCalendarEvent]
+    total_count: int
+
+class TournamentSearchItem(BaseModel):
+    tournament_id: str
+    name: str
+    location: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    image_url: Optional[str] = None
+    tags: List[str] = []
+    tournament_url: Optional[str] = None
+    draws_url: Optional[str] = None
+
+class TournamentSearchResponse(BaseModel):
+    query: str
+    source: str
+    last_updated: str
+    items: List[TournamentSearchItem]
+    total_count: int
+
+class TournamentDrawItem(BaseModel):
+    name: str
+    size: Optional[str] = None
+    type: Optional[str] = None
+    stage: Optional[str] = None
+    consolation: Optional[str] = None
+    url: str
+
+class TournamentDrawsResponse(BaseModel):
+    tournament_id: str
+    source: str
+    last_updated: str
+    draws: List[TournamentDrawItem]
+    total_count: int
+
+
+def _map_category_code_from_text(text: str) -> Optional[str]:
+    t = (text or "").strip().lower()
+    if "men" in t and "single" in t:
+        return "MS"
+    if ("women" in t or "ladies" in t) and "single" in t:
+        return "WS"
+    if "men" in t and "double" in t:
+        return "MD"
+    if ("women" in t or "ladies" in t) and "double" in t:
+        return "WD"
+    if "mixed" in t:
+        return "XD"
+    return None
+
+
+async def scrape_player_profile(player_id: str) -> PlayerProfileResponse:
+    player_id = str(player_id).strip()
+    if not re.match(r"^\d+$", player_id):
+        raise ValueError("player_id invalide")
+
+    url = f"https://badmintoncanada.tournamentsoftware.com/ranking/player.aspx?id={RANKING_LIST_ID}&player={player_id}"
+    print(f"🌐 Scraping Player: {url}")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = await client.get(url, headers=headers, follow_redirects=True)
+        response.raise_for_status()
+
+    html = response.text
+    # Example: "Ranking of Victor Lai (ON13010)"
+    full_name = f"Player {player_id}"
+    member_id = None
+    province = None
+    m = re.search(r"Ranking of\s+(.+?)\s*\(([^)]+)\)", html, flags=re.IGNORECASE)
+    if m:
+        full_name = m.group(1).strip()
+        member_id = m.group(2).strip()
+        if member_id and re.match(r"^[A-Z]{2}\d+", member_id):
+            province = member_id[:2]
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Find ranking table: has "Category" and "Points"
+    target_table = None
+    for table in soup.find_all("table"):
+        txt = table.get_text(" ", strip=True).lower()
+        if "category" in txt and "points" in txt:
+            target_table = table
+            break
+
+    rankings: List[PlayerRankingItem] = []
+    if target_table:
+        for tr in target_table.find_all("tr"):
+            tds = tr.find_all("td")
+            if len(tds) < 4:
+                continue
+
+            # Category cell
+            cat_link = tds[0].find("a")
+            category_name = tds[0].get_text(" ", strip=True)
+            if cat_link:
+                category_name = cat_link.get_text(" ", strip=True) or category_name
+            category_code = _map_category_code_from_text(category_name) or ""
+            if not category_code:
+                continue
+
+            # Partner cell (if any)
+            partner_name = None
+            partner_player_id = None
+            partner_link = tds[1].find("a", href=True)
+            if partner_link:
+                partner_name = partner_link.get_text(" ", strip=True)
+                href = partner_link.get("href", "")
+                pm = re.search(r"[?&]player=(\d+)", href)
+                if pm:
+                    partner_player_id = pm.group(1)
+
+            # Rank cell: first td with class 'rank' inside row
+            rank_val = None
+            for td in tr.find_all("td", class_=re.compile(r"\brank\b")):
+                candidate = td.get_text(" ", strip=True)
+                rm = re.search(r"(\d+)", candidate)
+                if rm:
+                    rank_val = int(rm.group(1))
+                    break
+            if rank_val is None:
+                continue
+
+            # Points cell
+            points_val = 0.0
+            td_points = tr.find("td", class_=re.compile(r"rankingpoints"))
+            if td_points:
+                raw = td_points.get_text(strip=True).replace(",", "")
+                try:
+                    points_val = float(raw) if raw else 0.0
+                except ValueError:
+                    points_val = 0.0
+
+            rankings.append(PlayerRankingItem(
+                category_code=category_code,
+                category_name=category_name,
+                rank=rank_val,
+                points=points_val,
+                partner_name=partner_name,
+                partner_player_id=partner_player_id
+            ))
+
+    return PlayerProfileResponse(
+        player_id=player_id,
+        full_name=full_name,
+        member_id=member_id,
+        province=province,
+        profile_url=url,
+        rankings=rankings,
+        last_updated=datetime.now().isoformat()
+    )
+
+
+async def search_players(query: str, limit: int = 20) -> List[PlayerSearchResult]:
+    q = (query or "").strip()
+    if len(q) < 2:
+        return []
+
+    # This endpoint requires a session cookie. We must GET the page first.
+    find_url = f"https://badmintoncanada.tournamentsoftware.com/ranking/find.aspx?id={RANKING_LIST_ID}"
+    webmethod_url = "https://badmintoncanada.tournamentsoftware.com/ranking/find.aspx/GetRankingPlayer"
+
+    payload = {
+        "LCID": 4105,
+        "RankingID": int(RANKING_LIST_ID),
+        # TS expects JS encodeURIComponent output
+        "Value": urllib.parse.quote(q, safe="")
+    }
+
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        # seed cookies
+        await client.get(find_url, headers=headers)
+        r = await client.post(
+            webmethod_url,
+            headers={
+                **headers,
+                "Content-Type": "application/json; charset=utf-8",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": find_url
+            },
+            json=payload
+        )
+        r.raise_for_status()
+        data = r.json()
+
+    items = data.get("d") or []
+    out: List[PlayerSearchResult] = []
+    for it in items[:limit]:
+        pid = str(it.get("ID") or "").strip()
+        name = str(it.get("Value") or "").strip()
+        member = it.get("ExtraInfo")
+        member_id = str(member).strip() if member else None
+        province = None
+        if member_id and re.match(r"^[A-Z]{2}\d+", member_id):
+            province = member_id[:2]
+        if pid and name:
+            out.append(PlayerSearchResult(
+                player_id=pid,
+                full_name=name,
+                member_id=member_id,
+                province=province
+            ))
+    return out
+
+
+ABC_CALENDAR_URL = "https://www.badmintonquebec.com/circuit-elite-abc-yonex-2-2449"
+TS_BASE = "https://badmintoncanada.tournamentsoftware.com"
+
+def _current_season_range() -> tuple[str, str]:
+    """
+    Returns (season_start, season_end) as YYYY-MM-DD strings for the current season.
+    We treat the badminton season as July 1 -> June 30 (ex: 2025-07-01 to 2026-06-30).
+    """
+    now = datetime.now()
+    start_year = now.year if now.month >= 7 else (now.year - 1)
+    end_year = start_year + 1
+    return (f"{start_year}-07-01", f"{end_year}-06-30")
+
+def _overlaps_season(start_date: Optional[str], end_date: Optional[str], season_start: str, season_end: str) -> bool:
+    """
+    Dates are expected as YYYY-MM-DD. Uses lexicographic compare which is valid for this format.
+    """
+    if not start_date:
+        return False
+    sd = start_date[:10]
+    ed = (end_date or start_date)[:10]
+    return (sd <= season_end) and (ed >= season_start)
+
+async def scrape_abc_calendar(limit: int = 200) -> List[ABCCalendarEvent]:
+    print(f"🌐 Scraping ABC Calendar: {ABC_CALENDAR_URL}")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = await client.get(ABC_CALENDAR_URL, headers=headers, follow_redirects=True)
+        resp.raise_for_status()
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    events: List[ABCCalendarEvent] = []
+    for div in soup.select("div.eventon_list_event"):
+        eid = div.get("data-event_id") or div.get("id") or ""
+        if not eid:
+            continue
+
+        data_time = div.get("data-time") or ""
+        m = re.match(r"^(\d+)-(\d+)$", data_time)
+        if not m:
+            continue
+        start_ts = int(m.group(1))
+        end_ts = int(m.group(2))
+
+        title_el = div.select_one(".evoet_title")
+        title = title_el.get_text(" ", strip=True) if title_el else ""
+        if not title:
+            continue
+
+        subtitle_el = div.select_one(".evcal_event_subtitle")
+        subtitle = subtitle_el.get_text(" ", strip=True) if subtitle_el else None
+
+        # Event URL: schema link (most reliable)
+        url = None
+        url_el = div.select_one(".evo_event_schema a[itemprop='url']")
+        if url_el and url_el.get("href"):
+            url = url_el.get("href")
+
+        # Image URL
+        image_url = None
+        ft = div.select_one(".ev_ftImg")
+        if ft:
+            image_url = ft.get("data-img") or ft.get("data-thumb")
+            if not image_url:
+                style = ft.get("style") or ""
+                sm = re.search(r'url\\(\"([^\"]+)\"\\)', style)
+                if sm:
+                    image_url = sm.group(1)
+
+        start_iso = datetime.fromtimestamp(start_ts).isoformat()
+        end_iso = datetime.fromtimestamp(end_ts).isoformat()
+
+        events.append(ABCCalendarEvent(
+            id=str(eid),
+            title=title,
+            subtitle=subtitle,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            start=start_iso,
+            end=end_iso,
+            url=url,
+            image_url=image_url
+        ))
+
+        if len(events) >= limit:
+            break
+
+    # Dedup by (url or id)
+    seen = set()
+    out: List[ABCCalendarEvent] = []
+    for e in events:
+        k = e.url or e.id
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(e)
+    return out
+
+async def search_tournaments_ts(query: str, page: int = 1, limit: int = 25) -> List[TournamentSearchItem]:
+    q = (query or "").strip()
+    if len(q) < 1:
+        return []
+
+    url = f"{TS_BASE}/find/tournament/DoSearch"
+    print(f"🌐 TS tournament search: {url} q={q}")
+    season_start, season_end = _current_season_range()
+
+    # If the user enters a single letter, TS returns lots of historical results first.
+    # We scan multiple pages until we collect enough tournaments in the current season.
+    max_pages = 10 if len(q) == 1 else 1
+    prefix_mode = (len(q) == 1)
+    letter = q.upper() if prefix_mode else None
+    # For 1-letter search, fetch the season list and filter locally by prefix.
+    ts_query = "" if prefix_mode else q
+
+    items: List[TournamentSearchItem] = []
+    seen_ids: set[str] = set()
+
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        headers = {"User-Agent": "Mozilla/5.0"}
+
+        for p in range(1, max_pages + 1):
+            data = {
+                "Page": str(p),
+                "TournamentExtendedFilter.SportID": "2",  # badminton
+                "TournamentFilter.Q": ts_query,
+                "TournamentFilter.StartDate": f"{season_start}T00:00",
+                "TournamentFilter.EndDate": f"{season_end}T00:00",
+            }
+            resp = await client.post(url, headers=headers, data=data)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            lis = soup.select("li.list__item")
+            if not lis:
+                break
+
+            for li in lis:
+                a = li.select_one("a.media__link[href*='/sport/tournament?id=']")
+                if not a or not a.get("href"):
+                    continue
+
+                href = a.get("href")
+                m = re.search(r"[?&]id=([0-9A-Fa-f\\-]{36})", href)
+                if not m:
+                    continue
+                tid = m.group(1).upper()
+                if tid in seen_ids:
+                    continue
+
+                name = a.get_text(" ", strip=True)
+                if not name:
+                    continue
+
+                # Single-letter mode: only keep tournaments starting with that letter
+                if prefix_mode and letter and not name.strip().upper().startswith(letter):
+                    continue
+
+                # location text
+                location = None
+                loc = li.select_one(".media__subheading .icon-marker")
+                if loc:
+                    location = loc.find_parent(class_=re.compile(r"media__subheading"))\
+                        .get_text(" ", strip=True).replace("  ", " ")
+                    location = re.sub(r"^\\s*\\S+\\s*", "", location) if location else location
+
+                # dates
+                times = li.find_all("time")
+                start_date = times[0].get("datetime") if len(times) >= 1 else None
+                end_date = times[1].get("datetime") if len(times) >= 2 else None
+                if start_date:
+                    start_date = start_date.split(" ")[0]
+                if end_date:
+                    end_date = end_date.split(" ")[0]
+
+                img = li.select_one("img.media__img-element")
+                image_url = None
+                if img and img.get("src"):
+                    src = img.get("src")
+                    image_url = src if src.startswith("http") else f"https:{src}"
+
+                tags = [t.get_text(" ", strip=True) for t in li.select(".tag") if t.get_text(strip=True)]
+
+                tournament_url = f"{TS_BASE}{href}"
+                draws_url = f"{TS_BASE}/sport/draws.aspx?id={tid}"
+
+                item = TournamentSearchItem(
+                    tournament_id=tid,
+                    name=name,
+                    location=location,
+                    start_date=start_date,
+                    end_date=end_date,
+                    image_url=image_url,
+                    tags=tags,
+                    tournament_url=tournament_url,
+                    draws_url=draws_url,
+                )
+
+                # Safety check: keep only tournaments overlapping season
+                if not _overlaps_season(item.start_date, item.end_date, season_start, season_end):
+                    continue
+
+                seen_ids.add(tid)
+                items.append(item)
+
+                if len(items) >= limit:
+                    return items
+
+    return items
+
+async def scrape_tournament_draws_ts(tournament_id: str) -> List[TournamentDrawItem]:
+    tid = (tournament_id or "").strip()
+    if not re.match(r"^[0-9A-Fa-f\\-]{36}$", tid):
+        raise ValueError("tournament_id invalide")
+    tid = tid.upper()
+
+    url = f"{TS_BASE}/sport/draws.aspx?id={tid}"
+    print(f"🌐 TS draws: {url}")
+
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        html = resp.text
+
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table")
+    if not table:
+        return []
+
+    out: List[TournamentDrawItem] = []
+    for tr in table.find_all("tr"):
+        tds = tr.find_all("td")
+        if len(tds) < 1:
+            continue
+        # First cell contains draw link
+        a = tds[0].find("a", href=True)
+        if not a:
+            continue
+        name = a.get_text(" ", strip=True)
+        href = a.get("href")
+        full_url = href if href.startswith("http") else f"{TS_BASE}/sport/{href.lstrip('/')}"
+
+        size = tds[1].get_text(" ", strip=True) if len(tds) > 1 else None
+        dtype = tds[2].get_text(" ", strip=True) if len(tds) > 2 else None
+        stage = tds[3].get_text(" ", strip=True) if len(tds) > 3 else None
+        consolation = tds[4].get_text(" ", strip=True) if len(tds) > 4 else None
+
+        out.append(TournamentDrawItem(
+            name=name,
+            size=size,
+            type=dtype,
+            stage=stage,
+            consolation=consolation,
+            url=full_url
+        ))
+
+    return out
+
+async def scrape_abc_rankings(tier: str, category: str, limit: int = 20) -> List[RankingEntry]:
+    """
+    Scrape Classement Élite ABC (Badminton Québec) and return top N for:
+      - tier: A/B/C
+      - category: MS/WS/MD/WD/XD (mapped to CoteS/CoteD/CoteDX and gender filter)
+    """
+    tier = tier.upper().strip()
+    category = category.upper().strip()
+
+    if tier not in ["A", "B", "C"]:
+        raise ValueError("Tier invalide (A, B, C)")
+    if category not in ["MS", "WS", "MD", "WD", "XD"]:
+        raise ValueError("Catégorie invalide (MS, WS, MD, WD, XD)")
+
+    # Map category to column + gender filter (table stores individuals with 'Classe' like 'A mas' / 'B fem')
+    if category in ["MS", "WS"]:
+        cote_key = "COTES"
+    elif category in ["MD", "WD"]:
+        cote_key = "COTED"
+    else:
+        cote_key = "COTEDX"
+
+    gender_needed = None
+    if category in ["MS", "MD"]:
+        gender_needed = "MAS"
+    elif category in ["WS", "WD"]:
+        gender_needed = "FEM"
+    # XD: include both genders (individual mixed rating)
+
+    print(f"🌐 Scraping ABC: {ABC_URL} | Tier={tier} | Category={category} | limit={limit}")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = await client.get(ABC_URL, headers=headers, follow_redirects=True)
+        response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    # Find the first large table (the ABC page contains a big sortable table)
+    table = soup.find("table")
+    if not table:
+        print("❌ ABC: aucune table trouvée")
+        return []
+
+    rows = table.find_all("tr")
+    if not rows:
+        print("❌ ABC: table vide")
+        return []
+
+    # Header detection
+    header_cells = rows[0].find_all(["th", "td"])
+    headers = [c.get_text(strip=True).upper() for c in header_cells]
+
+    def find_col(name: str) -> int:
+        try:
+            return headers.index(name)
+        except ValueError:
+            return -1
+
+    idx_no = find_col("NO")
+    idx_nom = find_col("NOM")
+    idx_classe = find_col("CLASSE")
+    idx_club = find_col("CLUB")
+    idx_cotes = find_col("COTES")
+    idx_coted = find_col("COTED")
+    idx_cotedx = find_col("COTEDX")
+
+    # Fallback: try partial matches if needed
+    if idx_no == -1:
+        for i, h in enumerate(headers):
+            if h.startswith("NO"):
+                idx_no = i
+                break
+    if idx_nom == -1:
+        for i, h in enumerate(headers):
+            if "NOM" in h:
+                idx_nom = i
+                break
+    if idx_classe == -1:
+        for i, h in enumerate(headers):
+            if "CLASSE" in h:
+                idx_classe = i
+                break
+
+    cote_idx_map = {"COTES": idx_cotes, "COTED": idx_coted, "COTEDX": idx_cotedx}
+    idx_cote = cote_idx_map.get(cote_key, -1)
+
+    if idx_no == -1 or idx_nom == -1 or idx_classe == -1 or idx_cote == -1:
+        print(f"❌ ABC: colonnes manquantes. headers={headers}")
+        return []
+
+    candidates = []
+    for row in rows[1:]:
+        cells = row.find_all(["td", "th"])
+        if len(cells) <= max(idx_no, idx_nom, idx_classe, idx_cote):
+            continue
+
+        no = cells[idx_no].get_text(strip=True)
+        nom = cells[idx_nom].get_text(strip=True)
+        classe = cells[idx_classe].get_text(strip=True).upper()
+        club = cells[idx_club].get_text(strip=True) if idx_club != -1 and len(cells) > idx_club else None
+        cote_raw = cells[idx_cote].get_text(strip=True)
+
+        # Filter tier + gender
+        if not classe.startswith(tier):
+            continue
+        if gender_needed and gender_needed not in classe:
+            continue
+
+        # Parse cote
+        # can be '', '0', '-1', '3,200' etc
+        cote_clean = cote_raw.replace(",", "").strip()
+        try:
+            cote_val = float(cote_clean) if cote_clean else 0.0
+        except ValueError:
+            cote_val = 0.0
+
+        if cote_val <= 0:
+            continue
+        if not nom:
+            continue
+
+        province = no[:2] if len(no) >= 2 and no[:2].isalpha() else None
+
+        candidates.append(
+            {
+                "player_id": no or None,
+                "player_name": nom,
+                "points": cote_val,
+                "province": province,
+                "club": club,
+            }
+        )
+
+    # Sort by points desc
+    candidates.sort(key=lambda x: x["points"], reverse=True)
+
+    is_doubles_category = category in ["MD", "WD", "XD"]
+    out: List[RankingEntry] = []
+
+    if is_doubles_category:
+        # Group by identical points (partners share same points)
+        grouped = {}
+        for entry in candidates:
+            grouped.setdefault(entry["points"], []).append(entry)
+
+        # Sort point groups desc and take top N groups as "positions"
+        point_values = sorted(grouped.keys(), reverse=True)
+        point_values = point_values[:limit]
+
+        for rank_idx, pts in enumerate(point_values, start=1):
+            group = grouped[pts]
+            # Deterministic order inside group
+            group.sort(key=lambda x: (x.get("player_name") or ""))
+
+            # Usually 2 partners. If more exist, keep first 2.
+            names = [g["player_name"] for g in group if g.get("player_name")]
+            display_name = "/".join(names[:2]) if names else ""
+
+            player_ids = [g["player_id"] for g in group if g.get("player_id")]
+            display_id = "/".join(player_ids[:2]) if player_ids else None
+
+            provinces = [g["province"] for g in group if g.get("province")]
+            display_prov = provinces[0] if provinces else None
+
+            out.append(
+                RankingEntry(
+                    rank=rank_idx,
+                    player_name=display_name,
+                    points=float(pts),
+                    province=display_prov,
+                    previous_rank=None,
+                    player_id=display_id,
+                )
+            )
+    else:
+        # Singles: take top N players
+        top = candidates[:limit]
+        for i, entry in enumerate(top, start=1):
+            out.append(
+                RankingEntry(
+                    rank=i,
+                    player_name=entry["player_name"],
+                    points=entry["points"],
+                    province=entry["province"],
+                    previous_rank=None,
+                    player_id=entry["player_id"],
+                )
+            )
+
+    print(f"✅ ABC: {len(out)} joueurs extraits (top {limit})")
+    if out:
+        print(f"   1er: {out[0].player_name} ({out[0].points})")
+    return out
+
+async def scrape_badminton_canada_news(limit: int = 20) -> List[NewsItem]:
+    """
+    Scrape Badminton Canada news via the public RSS feed (includes image enclosure URLs).
+    """
+    print(f"🌐 Scraping News RSS: {BADMINTON_CANADA_NEWS_FEED}")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = await client.get(BADMINTON_CANADA_NEWS_FEED, headers=headers, follow_redirects=True)
+        response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "xml")
+    items: List[NewsItem] = []
+
+    for item in soup.find_all("item"):
+        title = (item.find("title").get_text(strip=True) if item.find("title") else "").strip()
+        link = (item.find("link").get_text(strip=True) if item.find("link") else "").strip()
+        guid = (item.find("guid").get_text(strip=True) if item.find("guid") else "").strip()
+        pub = (item.find("pubDate").get_text(strip=True) if item.find("pubDate") else None)
+        desc = (item.find("description").get_text(strip=True) if item.find("description") else None)
+
+        enclosure = item.find("enclosure")
+        image_url = enclosure.get("url") if enclosure and enclosure.get("url") else None
+
+        if not link or not title:
+            continue
+
+        items.append(NewsItem(
+            id=guid or link,
+            title=title,
+            url=link,
+            image_url=image_url,
+            excerpt=desc or None,
+            published=pub
+        ))
+
+        # Keep collecting; we will filter by language below.
+
+    # Keep only French items (feed mixes FR + EN)
+    fr_items = []
+    for it in items:
+        fr, en, accents = _lang_score(it.title)
+        if accents or (fr > en):
+            fr_items.append(it)
+    return fr_items[:limit]
+
+@app.get("/")
+async def root():
+    return {
+        "message": "BCR API v3 - Real Data Working",
+        "version": "3.0.0",
+        "endpoints": [
+            "/health",
+            "/rankings/{category}/national",
+            "/cache/clear"
+        ]
+    }
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
+@app.get("/rankings/{category}/national", response_model=RankingResponse)
+async def get_national_rankings(category: str):
+    category = category.upper()
+    
+    if category not in ["MS", "WS", "MD", "WD", "XD"]:
+        raise HTTPException(status_code=400, detail="Catégorie invalide")
+    
+    # Vérifier le cache
+    cache_key = f"national_{category}"
+    if cache_key in cache:
+        data, timestamp = cache[cache_key]
+        if datetime.now() - timestamp < CACHE_DURATION:
+            print(f"✅ Cache hit pour {cache_key}")
+            return data
+    
+    print(f"🔄 Scraping de {category}...")
+    
+    # Scraper les données
+    rankings = await scrape_rankings(category)
+    
+    response = RankingResponse(
+        category=category,
+        scope="national",
+        last_updated=datetime.now().isoformat(),
+        rankings=rankings,
+        total_count=len(rankings)
+    )
+    
+    # Mettre en cache
+    cache[cache_key] = (response, datetime.now())
+    
+    return response
+
+@app.get("/abc/{tier}/{category}", response_model=RankingResponse)
+async def get_abc_rankings(tier: str, category: str):
+    """
+    Classement Élite ABC (Badminton Québec).
+    tier: A/B/C
+    category: MS/WS/MD/WD/XD
+    """
+    tier = tier.upper()
+    category = category.upper()
+
+    cache_key = f"abc_{tier}_{category}"
+    if cache_key in cache:
+        data, timestamp = cache[cache_key]
+        if datetime.now() - timestamp < CACHE_DURATION:
+            print(f"✅ Cache hit pour {cache_key}")
+            return data
+
+    try:
+        rankings = await scrape_abc_rankings(tier=tier, category=category, limit=20)
+        response = RankingResponse(
+            category=category,
+            scope=f"abc-{tier}",
+            last_updated=datetime.now().isoformat(),
+            rankings=rankings,
+            total_count=len(rankings),
+        )
+        cache[cache_key] = (response, datetime.now())
+        return response
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Erreur HTTP ABC")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"❌ ABC erreur: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne ABC")
+
+@app.get("/news", response_model=NewsResponse)
+async def get_news():
+    cache_key = "news_badmintonca_fr"
+    if cache_key in cache:
+        data, timestamp = cache[cache_key]
+        if datetime.now() - timestamp < CACHE_DURATION:
+            print(f"✅ Cache hit pour {cache_key}")
+            return data
+
+    try:
+        items = await scrape_badminton_canada_news(limit=20)
+        response = NewsResponse(
+            source="badminton.ca",
+            last_updated=datetime.now().isoformat(),
+            items=items,
+            total_count=len(items),
+        )
+        cache[cache_key] = (response, datetime.now())
+        return response
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Erreur HTTP News")
+    except Exception as e:
+        print(f"❌ News erreur: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne News")
+
+
+@app.get("/media/photos/{player_id}", response_model=List[MediaPhoto])
+async def list_media_photos(player_id: str):
+    items = _load_media_photos(player_id)
+    # Add image_url for each item (relative path)
+    out: List[MediaPhoto] = []
+    for it in items:
+        file_name = it.get("file_name") or ""
+        object_key = (it.get("object_key") or "").strip()
+        if not object_key and file_name:
+            object_key = f"photos/{player_id}/{file_name}"
+        image_url = MEDIA_STORAGE.public_url_for(object_key) if object_key else None
+        if not image_url and file_name:
+            # Backward compatible local path (older metadata)
+            image_url = f"/media-files/photos/{player_id}/{file_name}"
+        out.append(
+            MediaPhoto(
+                id=it.get("id") or "",
+                user_id=it.get("user_id") or player_id,
+                file_name=file_name,
+                created_at=it.get("created_at") or "",
+                added_by=it.get("added_by") or "media",
+                added_by_id=it.get("added_by_id"),
+                image_url=image_url
+            )
+        )
+    return out
+
+
+@app.post("/media/photos/{player_id}", response_model=List[MediaPhoto])
+async def upload_media_photo(
+    player_id: str,
+    file: UploadFile = File(...),
+    added_by: str = Form("media"),
+    added_by_id: Optional[str] = Form(None)
+):
+    pid = str(player_id).strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="player_id invalide")
+
+    pdir = _media_player_dir(pid)
+    os.makedirs(pdir, exist_ok=True)
+
+    # Save file (expects JPEG from app)
+    photo_id = str(uuid.uuid4())
+    file_name = f"photo_{photo_id}.jpg"
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Fichier vide")
+    object_key = f"photos/{pid}/{file_name}"
+    try:
+        MEDIA_STORAGE.put_bytes(object_key=object_key, data=data, content_type="image/jpeg")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur storage media: {e}")
+
+    created_at = datetime.now().isoformat()
+    items = _load_media_photos(pid)
+    items.insert(
+        0,
+        {
+            "id": photo_id,
+            "user_id": pid,
+            "file_name": file_name,
+            "object_key": object_key,
+            "created_at": created_at,
+            "added_by": added_by,
+            "added_by_id": added_by_id,
+        }
+    )
+    _save_media_photos(pid, items)
+
+    # Return updated list
+    return await list_media_photos(pid)
+
+
+@app.delete("/media/photos/{player_id}/{photo_id}", response_model=List[MediaPhoto])
+async def delete_media_photo(
+    player_id: str,
+    photo_id: str,
+    added_by_id: Optional[str] = Query(None)
+):
+    """
+    Deletes a media photo.
+    Security note: this is NOT strong auth. We only allow deleting "media" uploads
+    when the provided added_by_id matches the stored added_by_id.
+    """
+    pid = str(player_id).strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="player_id invalide")
+    photo_id = str(photo_id).strip()
+    if not photo_id:
+        raise HTTPException(status_code=400, detail="photo_id invalide")
+
+    items = _load_media_photos(pid)
+    target = None
+    for it in items:
+        if (it.get("id") or "") == photo_id:
+            target = it
+            break
+
+    if not target:
+        raise HTTPException(status_code=404, detail="Photo introuvable")
+
+    added_by = (target.get("added_by") or "").strip()
+    stored_uploader = (target.get("added_by_id") or "").strip()
+    provided = str(added_by_id).strip() if added_by_id is not None else ""
+
+    # Allow deletion when the caller proves they are the original uploader.
+    # "media" uploads require matching added_by_id; "self" uploads also require matching added_by_id.
+    if added_by not in ["media", "self"]:
+        raise HTTPException(status_code=403, detail="Suppression non autorisée")
+    if not provided or stored_uploader != provided:
+        raise HTTPException(status_code=403, detail="Suppression non autorisée")
+
+    # Remove object (best-effort)
+    object_key = (target.get("object_key") or "").strip()
+    if not object_key:
+        file_name = (target.get("file_name") or "").strip()
+        if file_name:
+            object_key = f"photos/{pid}/{file_name}"
+    if object_key:
+        MEDIA_STORAGE.delete(object_key)
+
+    # Remove from metadata
+    next_items = [it for it in items if (it.get("id") or "") != photo_id]
+    _save_media_photos(pid, next_items)
+    return await list_media_photos(pid)
+
+
+@app.get("/media/avatar/{player_id}")
+async def get_media_avatar(player_id: str):
+    pid = str(player_id).strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="player_id invalide")
+    file_name = f"avatar_{pid}.jpg"
+    object_key = f"avatars/{file_name}"
+    if not MEDIA_STORAGE.exists(object_key):
+        return {"avatar_url": None}
+    url = MEDIA_STORAGE.public_url_for(object_key) or f"/media-files/avatars/{file_name}"
+    return {"avatar_url": url}
+
+
+@app.post("/media/avatar/{player_id}")
+async def upload_media_avatar(
+    player_id: str,
+    file: UploadFile = File(...)
+):
+    pid = str(player_id).strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="player_id invalide")
+
+    os.makedirs(MEDIA_AVATARS_DIR, exist_ok=True)
+    file_name = f"avatar_{pid}.jpg"
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Fichier vide")
+    object_key = f"avatars/{file_name}"
+    try:
+        MEDIA_STORAGE.put_bytes(object_key=object_key, data=data, content_type="image/jpeg")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur storage media: {e}")
+    return {"avatar_url": MEDIA_STORAGE.public_url_for(object_key) or f"/media-files/avatars/{file_name}"}
+
+
+@app.get("/player/{player_id}", response_model=PlayerProfileResponse)
+async def get_player_profile(player_id: str):
+    cache_key = f"player_{player_id}"
+    if cache_key in cache:
+        data, timestamp = cache[cache_key]
+        if datetime.now() - timestamp < CACHE_DURATION:
+            print(f"✅ Cache hit pour {cache_key}")
+            return data
+
+    try:
+        profile = await scrape_player_profile(player_id)
+        cache[cache_key] = (profile, datetime.now())
+        return profile
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Erreur HTTP Player")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"❌ Player erreur: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne Player")
+
+
+@app.get("/players/search", response_model=List[PlayerSearchResult])
+async def players_search(q: str):
+    q_norm = (q or "").strip().lower()
+    cache_key = f"player_search_{q_norm}"
+    if cache_key in cache:
+        data, timestamp = cache[cache_key]
+        if datetime.now() - timestamp < CACHE_DURATION:
+            print(f"✅ Cache hit pour {cache_key}")
+            return data
+
+    try:
+        results = await search_players(q, limit=25)
+        cache[cache_key] = (results, datetime.now())
+        return results
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Erreur HTTP Search")
+    except Exception as e:
+        print(f"❌ Search erreur: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne Search")
+
+
+@app.get("/abc/calendar", response_model=ABCCalendarResponse)
+async def get_abc_calendar():
+    cache_key = "abc_calendar"
+    if cache_key in cache:
+        data, timestamp = cache[cache_key]
+        if datetime.now() - timestamp < CACHE_DURATION:
+            print(f"✅ Cache hit pour {cache_key}")
+            return data
+
+    try:
+        events = await scrape_abc_calendar(limit=250)
+        resp = ABCCalendarResponse(
+            source=ABC_CALENDAR_URL,
+            last_updated=datetime.now().isoformat(),
+            events=events,
+            total_count=len(events),
+        )
+        cache[cache_key] = (resp, datetime.now())
+        return resp
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Erreur HTTP ABC Calendar")
+    except Exception as e:
+        print(f"❌ ABC Calendar erreur: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne ABC Calendar")
+
+
+@app.get("/tournaments/search", response_model=TournamentSearchResponse)
+async def tournaments_search(q: str):
+    q = (q or "").strip()
+    if len(q) < 1:
+        return TournamentSearchResponse(
+            query=q,
+            source=f"{TS_BASE}/find",
+            last_updated=datetime.now().isoformat(),
+            items=[],
+            total_count=0,
+        )
+    season_start, season_end = _current_season_range()
+    cache_key = f"ts_tournaments_search_{q.lower()}_{season_start}_{season_end}"
+    if cache_key in cache:
+        data, timestamp = cache[cache_key]
+        if datetime.now() - timestamp < CACHE_DURATION:
+            print(f"✅ Cache hit pour {cache_key}")
+            return data
+
+    try:
+        items = await search_tournaments_ts(query=q, page=1, limit=25)
+        resp = TournamentSearchResponse(
+            query=q,
+            source=f"{TS_BASE}/find (season {season_start}..{season_end})",
+            last_updated=datetime.now().isoformat(),
+            items=items,
+            total_count=len(items),
+        )
+        cache[cache_key] = (resp, datetime.now())
+        return resp
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Erreur HTTP TS search")
+    except Exception as e:
+        print(f"❌ TS search erreur: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne TS search")
+
+
+@app.get("/tournament/{tournament_id}/draws", response_model=TournamentDrawsResponse)
+async def tournament_draws(tournament_id: str):
+    cache_key = f"ts_draws_{tournament_id.upper()}"
+    if cache_key in cache:
+        data, timestamp = cache[cache_key]
+        if datetime.now() - timestamp < CACHE_DURATION:
+            print(f"✅ Cache hit pour {cache_key}")
+            return data
+
+    try:
+        draws = await scrape_tournament_draws_ts(tournament_id=tournament_id)
+        resp = TournamentDrawsResponse(
+            tournament_id=tournament_id.upper(),
+            source=f"{TS_BASE}/sport/draws.aspx?id={tournament_id.upper()}",
+            last_updated=datetime.now().isoformat(),
+            draws=draws,
+            total_count=len(draws),
+        )
+        cache[cache_key] = (resp, datetime.now())
+        return resp
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Erreur HTTP TS draws")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"❌ TS draws erreur: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne TS draws")
+
+@app.post("/cache/clear")
+async def clear_cache():
+    cache.clear()
+    return {"message": "Cache vidé"}
+
+if __name__ == "__main__":
+    import uvicorn
+    print("🚀 BCR API v3 sur http://localhost:8000")
+    uvicorn.run(app, host="0.0.0.0", port=8000)

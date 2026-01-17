@@ -1,0 +1,377 @@
+INFO:     Started server process [49098]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+🚀 BCR API v3 sur http://localhost:8000
+INFO:     127.0.0.1:55822 - "GET /health HTTP/1.1" 200 OK
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=A
+INFO:     127.0.0.1:55823 - "GET /tournaments/search?q=A HTTP/1.1" 200 OK
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=V
+INFO:     127.0.0.1:55873 - "GET /tournaments/search?q=V HTTP/1.1" 200 OK
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=Vq
+INFO:     127.0.0.1:55873 - "GET /tournaments/search?q=Vq HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_v_2025-07-01_2026-06-30
+INFO:     127.0.0.1:55873 - "GET /tournaments/search?q=V HTTP/1.1" 200 OK
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=Vz
+INFO:     127.0.0.1:55873 - "GET /tournaments/search?q=Vz HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_v_2025-07-01_2026-06-30
+INFO:     127.0.0.1:55873 - "GET /tournaments/search?q=V HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_vz_2025-07-01_2026-06-30
+INFO:     127.0.0.1:55873 - "GET /tournaments/search?q=Vz HTTP/1.1" 200 OK
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=Vza
+✅ Cache hit pour ts_tournaments_search_vz_2025-07-01_2026-06-30
+INFO:     127.0.0.1:55885 - "GET /tournaments/search?q=Vz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55873 - "GET /tournaments/search?q=Vza HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_v_2025-07-01_2026-06-30
+INFO:     127.0.0.1:55873 - "GET /tournaments/search?q=V HTTP/1.1" 200 OK
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=Va
+INFO:     127.0.0.1:55873 - "GET /tournaments/search?q=Va HTTP/1.1" 200 OK
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=Val
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=Vall
+INFO:     127.0.0.1:55873 - "GET /tournaments/search?q=Val HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55885 - "GET /tournaments/search?q=Vall HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55873 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55873 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:55897 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:55945 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55945 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:55947 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56074 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56074 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56076 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56099 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56099 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56101 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56134 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56134 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56136 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56148 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56148 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56150 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56348 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56348 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56350 - "GET /player/current HTTP/1.1" 400 Bad Request
+✅ Cache hit pour ts_tournaments_search_v_2025-07-01_2026-06-30
+INFO:     127.0.0.1:56359 - "GET /tournaments/search?q=V HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_vq_2025-07-01_2026-06-30
+INFO:     127.0.0.1:56359 - "GET /tournaments/search?q=Vq HTTP/1.1" 200 OK
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=Vql
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=Vqll
+INFO:     127.0.0.1:56359 - "GET /tournaments/search?q=Vql HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56363 - "GET /tournaments/search?q=Vqll HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_vql_2025-07-01_2026-06-30
+INFO:     127.0.0.1:56359 - "GET /tournaments/search?q=Vql HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_vq_2025-07-01_2026-06-30
+INFO:     127.0.0.1:56359 - "GET /tournaments/search?q=Vq HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_v_2025-07-01_2026-06-30
+INFO:     127.0.0.1:56359 - "GET /tournaments/search?q=V HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_va_2025-07-01_2026-06-30
+INFO:     127.0.0.1:56359 - "GET /tournaments/search?q=Va HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_val_2025-07-01_2026-06-30
+INFO:     127.0.0.1:56359 - "GET /tournaments/search?q=Val HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_vall_2025-07-01_2026-06-30
+INFO:     127.0.0.1:56359 - "GET /tournaments/search?q=Vall HTTP/1.1" 200 OK
+🌐 TS draws: https://badmintoncanada.tournamentsoftware.com/sport/draws.aspx?id=A8EABB0B-E17E-4A8A-AC93-49168DD8A9AE
+INFO:     127.0.0.1:56359 - "GET /tournament/A8EABB0B-E17E-4A8A-AC93-49168DD8A9AE/draws HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56666 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56666 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56668 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56715 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56715 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:56717 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:57609 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57609 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:57611 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:57624 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57624 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:57626 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:57629 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57629 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:57631 - "GET /player/current HTTP/1.1" 400 Bad Request
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+INFO:     127.0.0.1:58017 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58017 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:58019 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:59299 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59299 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:59301 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:59306 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59306 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:59308 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:59310 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59310 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:59312 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:59313 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59313 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:59315 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:59341 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59341 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:59343 - "GET /player/current HTTP/1.1" 400 Bad Request
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=v
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=vvv
+INFO:     127.0.0.1:59346 - "GET /tournaments/search?q=vvv HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_vvv_2025-07-01_2026-06-30
+INFO:     127.0.0.1:59346 - "GET /tournaments/search?q=vvv HTTP/1.1" 200 OK
+✅ Cache hit pour ts_tournaments_search_vvv_2025-07-01_2026-06-30
+INFO:     127.0.0.1:59349 - "GET /tournaments/search?q=vvv HTTP/1.1" 200 OK
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=vv
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=v
+INFO:     127.0.0.1:59346 - "GET /tournaments/search?q=vv HTTP/1.1" 200 OK
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=va
+INFO:     127.0.0.1:59346 - "GET /tournaments/search?q=va HTTP/1.1" 200 OK
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=val
+INFO:     127.0.0.1:59345 - "GET /tournaments/search?q=v HTTP/1.1" 200 OK
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=vall
+🌐 TS tournament search: https://badmintoncanada.tournamentsoftware.com/find/tournament/DoSearch q=valle
+INFO:     127.0.0.1:59354 - "GET /tournaments/search?q=val HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59346 - "GET /tournaments/search?q=vall HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59345 - "GET /tournaments/search?q=valle HTTP/1.1" 200 OK
+🌐 TS draws: https://badmintoncanada.tournamentsoftware.com/sport/draws.aspx?id=A8EABB0B-E17E-4A8A-AC93-49168DD8A9AE
+INFO:     127.0.0.1:59345 - "GET /tournament/A8EABB0B-E17E-4A8A-AC93-49168DD8A9AE/draws HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59349 - "GET /tournaments/search?q=v HTTP/1.1" 200 OK
+✅ Cache hit pour ts_draws_A8EABB0B-E17E-4A8A-AC93-49168DD8A9AE
+INFO:     127.0.0.1:59366 - "GET /tournament/A8EABB0B-E17E-4A8A-AC93-49168DD8A9AE/draws HTTP/1.1" 200 OK
+✅ Cache hit pour ts_draws_A8EABB0B-E17E-4A8A-AC93-49168DD8A9AE
+INFO:     127.0.0.1:59384 - "GET /tournament/A8EABB0B-E17E-4A8A-AC93-49168DD8A9AE/draws HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59387 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59387 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:59389 - "GET /player/current HTTP/1.1" 400 Bad Request
+🌐 TS draws: https://badmintoncanada.tournamentsoftware.com/sport/draws.aspx?id=A8EABB0B-E17E-4A8A-AC93-49168DD8A9AE
+INFO:     127.0.0.1:60602 - "GET /tournament/A8EABB0B-E17E-4A8A-AC93-49168DD8A9AE/draws HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60602 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60602 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:60605 - "GET /player/current HTTP/1.1" 400 Bad Request
+🌐 Scraping News RSS: https://www.badminton.ca/newsfeed/0/
+INFO:     127.0.0.1:60807 - "GET /news HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60807 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60807 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:60811 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:64783 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64783 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:64785 - "GET /player/current HTTP/1.1" 400 Bad Request
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+WARNING:  Invalid HTTP request received.
+INFO:     192.168.2.28:57412 - "GET /health HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57411 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     192.168.2.28:57539 - "GET /health HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57538 - "GET /health HTTP/1.1" 200 OK
+🔄 Scraping de MS...
+🌐 Scraping: https://badmintoncanada.tournamentsoftware.com/ranking/category.aspx?id=49797&category=151
+🔄 Scraping de MS...
+🌐 Scraping: https://badmintoncanada.tournamentsoftware.com/ranking/category.aspx?id=49797&category=151
+📊 28 lignes dans la table
+✅ 25 joueurs extraits
+   1er: Victor Lai
+INFO:     192.168.2.28:57538 - "GET /rankings/MS/national HTTP/1.1" 200 OK
+📊 28 lignes dans la table
+✅ 25 joueurs extraits
+   1er: Victor Lai
+INFO:     192.168.2.28:57539 - "GET /rankings/MS/national HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57540 - "GET /health HTTP/1.1" 200 OK
+🌐 Scraping Player: https://badmintoncanada.tournamentsoftware.com/ranking/player.aspx?id=49797&player=2772368
+🌐 Scraping ABC Calendar: https://www.badmintonquebec.com/circuit-elite-abc-yonex-2-2449
+INFO:     192.168.2.28:57541 - "GET /abc/calendar HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57540 - "GET /player/2772368 HTTP/1.1" 200 OK
+🌐 Scraping News RSS: https://www.badminton.ca/newsfeed/0/
+INFO:     192.168.2.28:57541 - "GET /health HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57541 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     192.168.2.28:57540 - "GET /news HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57540 - "GET /health HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57549 - "GET /players/search?q=%3Ch2%20class%3D%22hgroup__heading%20truncate%22%3EBadminton%20Canada%3C/h2%3E HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57550 - "GET /players/search?q=Jean-Nicolas%20Normandin HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57550 - "GET /health HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57556 - "GET /health HTTP/1.1" 200 OK
+🌐 Scraping Player: https://badmintoncanada.tournamentsoftware.com/ranking/player.aspx?id=49797&player=5014048
+INFO:     192.168.2.28:57556 - "GET /player/5014048 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57560 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_5014048
+INFO:     192.168.2.28:57560 - "GET /player/5014048 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57561 - "GET /health HTTP/1.1" 200 OK
+🌐 Scraping Player: https://badmintoncanada.tournamentsoftware.com/ranking/player.aspx?id=49797&player=3484563
+INFO:     192.168.2.28:57561 - "GET /player/3484563 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57562 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_5014048
+INFO:     192.168.2.28:57562 - "GET /player/5014048 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57563 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_3484563
+INFO:     192.168.2.28:57563 - "GET /player/3484563 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57581 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_5014048
+INFO:     192.168.2.28:57581 - "GET /player/5014048 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57582 - "GET /health HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57584 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_3484563
+INFO:     192.168.2.28:57584 - "GET /player/3484563 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57586 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_5014048
+INFO:     192.168.2.28:57586 - "GET /player/5014048 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57628 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_2772368
+INFO:     192.168.2.28:57628 - "GET /player/2772368 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57629 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_5014048
+INFO:     192.168.2.28:57628 - "GET /player/5014048 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57632 - "GET /health HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57633 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_3484563
+INFO:     192.168.2.28:57633 - "GET /player/3484563 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57634 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_5014048
+INFO:     192.168.2.28:57634 - "GET /player/5014048 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57740 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_5014048
+INFO:     192.168.2.28:57740 - "GET /player/5014048 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57748 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_3484563
+INFO:     192.168.2.28:57748 - "GET /player/3484563 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57750 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_3484563
+INFO:     192.168.2.28:57750 - "GET /player/3484563 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57751 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_5014048
+INFO:     192.168.2.28:57751 - "GET /player/5014048 HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57898 - "GET /health HTTP/1.1" 200 OK
+INFO:     192.168.2.28:57898 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     192.168.2.28:58828 - "GET /health HTTP/1.1" 200 OK
+🌐 Scraping Player: https://badmintoncanada.tournamentsoftware.com/ranking/player.aspx?id=49797&player=5014048
+INFO:     192.168.2.28:58828 - "GET /player/5014048 HTTP/1.1" 200 OK
+🌐 Scraping News RSS: https://www.badminton.ca/newsfeed/0/
+INFO:     127.0.0.1:52177 - "GET /news HTTP/1.1" 200 OK
+🌐 Scraping ABC Calendar: https://www.badmintonquebec.com/circuit-elite-abc-yonex-2-2449
+INFO:     127.0.0.1:52177 - "GET /abc/calendar HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52386 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52386 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52388 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52396 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52396 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52398 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52406 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52406 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52408 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52429 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52429 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52431 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52626 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52626 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52628 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52634 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52634 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52636 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52644 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52644 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52646 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:52651 - "GET /players/search?q=tho,qs HTTP/1.1" 200 OK
+✅ Cache hit pour player_search_tho
+INFO:     127.0.0.1:52656 - "GET /players/search?q=tho HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52661 - "GET /players/search?q=Le HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52661 - "GET /players/search?q=Lefe HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52661 - "GET /health HTTP/1.1" 200 OK
+🌐 Scraping Player: https://badmintoncanada.tournamentsoftware.com/ranking/player.aspx?id=49797&player=5869692
+INFO:     127.0.0.1:52661 - "GET /player/5869692 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52667 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52669 - "GET /health HTTP/1.1" 200 OK
+✅ Cache hit pour player_5869692
+INFO:     127.0.0.1:52669 - "GET /player/5869692 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52735 - "GET /health HTTP/1.1" 200 OK
+🌐 Scraping ABC: https://www.badmintonquebec.com/classement-elite-abc-2025-2026 | Tier=B | Category=MS | limit=20
+✅ ABC: 20 joueurs extraits (top 20)
+   1er: Zhang, Weison (10000.0)
+INFO:     127.0.0.1:52735 - "GET /abc/B/MS HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52771 - "GET /health HTTP/1.1" 200 OK
+🌐 Scraping ABC: https://www.badmintonquebec.com/classement-elite-abc-2025-2026 | Tier=C | Category=MS | limit=20
+✅ ABC: 20 joueurs extraits (top 20)
+   1er: AndresMonegro, Ivan (10000.0)
+INFO:     127.0.0.1:52771 - "GET /abc/C/MS HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52826 - "GET /health HTTP/1.1" 200 OK
+🌐 Scraping ABC: https://www.badmintonquebec.com/classement-elite-abc-2025-2026 | Tier=C | Category=MD | limit=20
+✅ ABC: 20 joueurs extraits (top 20)
+   1er: Baillargeon, Maël/Bernier-Tremblay, Félix (10000.0)
+INFO:     127.0.0.1:52826 - "GET /abc/C/MD HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52975 - "GET /players/search?q=Lai HTTP/1.1" 200 OK
+✅ Cache hit pour player_search_lai
+INFO:     127.0.0.1:52975 - "GET /players/search?q=Lai HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52975 - "GET /players/search?q=Lai%20Vi HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52975 - "GET /health HTTP/1.1" 200 OK
+🌐 Scraping Player: https://badmintoncanada.tournamentsoftware.com/ranking/player.aspx?id=49797&player=3484563
+INFO:     127.0.0.1:52975 - "GET /player/3484563 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53078 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53078 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:53081 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:53296 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53296 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:53299 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:53894 - "GET /players/search?q=Qa HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53900 - "GET /players/search?q=Desj HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53900 - "GET /health HTTP/1.1" 200 OK
+🌐 Scraping Player: https://badmintoncanada.tournamentsoftware.com/ranking/player.aspx?id=49797&player=5080919
+INFO:     127.0.0.1:53900 - "GET /player/5080919 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55516 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55516 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:55518 - "GET /player/current HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:57312 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57313 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57312 - "GET /media/photos/8AABB4ED-9CB2-43F4-8147-5C601DF11311 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:57313 - "GET /media/photos/8AABB4ED-9CB2-43F4-8147-5C601DF11311 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:57315 - "GET /media/photos/8AABB4ED-9CB2-43F4-8147-5C601DF11311 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:57317 - "GET /media/photos/8AABB4ED-9CB2-43F4-8147-5C601DF11311 HTTP/1.1" 404 Not Found
