@@ -1035,6 +1035,15 @@ async def root():
 async def health():
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
+@app.get("/rankings/{category}", response_model=RankingResponse)
+async def get_rankings(category: str, scope: str = "national", province: Optional[str] = None):
+    scope_norm = (scope or "national").strip().lower()
+    if scope_norm in ["national", "nat"]:
+        return await get_national_rankings(category)
+    if scope_norm == "provincial":
+        raise HTTPException(status_code=501, detail="Le scope provincial n'est plus supporté par cette API.")
+    raise HTTPException(status_code=400, detail="Scope invalide")
+    
 @app.get("/rankings/{category}/national", response_model=RankingResponse)
 async def get_national_rankings(category: str):
     category = category.upper()
