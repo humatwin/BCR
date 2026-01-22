@@ -1617,6 +1617,35 @@ def _detect_event_code(lines: List[str], tournament_name: Optional[str]) -> Opti
     return None
 
 
+def _parse_match_segments_from_text(lines: List[str], tournament_name: Optional[str]) -> List[dict]:
+    segments: List[List[str]] = []
+    current: List[str] = []
+    for line in lines:
+        if line.strip().upper() == "H2H":
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(line)
+    if current:
+        segments.append(current)
+
+    out: List[dict] = []
+    for seg in segments:
+        event = _detect_event_code(seg, tournament_name)
+        if event not in ["MS", "WS"]:
+            continue
+        names = _extract_names_from_lines(seg)
+        if len(names) < 2:
+            continue
+        out.append({
+            "event": event,
+            "player_a_name": names[0],
+            "player_b_name": names[1],
+        })
+    return out
+
+
 async def _fetch_tournament_matches(tournament_id: str) -> tuple[Optional[str], List[dict]]:
     tid = (tournament_id or "").strip()
     if not re.match(r"^[0-9A-Fa-f\\-]{36}$", tid):
@@ -1633,9 +1662,21 @@ async def _fetch_tournament_matches(tournament_id: str) -> tuple[Optional[str], 
 
     matchups: List[dict] = []
     seen = set()
-    debug_blocks: List[dict] = []
 
-    # Match cards often include "H2H" link/button; use it as anchor.
+    # Primary: parse the full page text by "H2H" separators.
+    page_lines = [l for l in soup.get_text("\n", strip=True).split("\n") if l.strip()]
+    parsed = _parse_match_segments_from_text(page_lines, tname)
+    for m in parsed:
+        key = (m["event"], m["player_a_name"], m["player_b_name"])
+        if key in seen:
+            continue
+        seen.add(key)
+        matchups.append(m)
+
+    if matchups:
+        return tname, matchups
+
+    # Fallback: Match cards often include "H2H" link/button; use it as anchor.
     for node in soup.find_all(string=lambda s: s and "H2H" in s):
         container = node.parent
         for _ in range(4):
@@ -1652,14 +1693,10 @@ async def _fetch_tournament_matches(tournament_id: str) -> tuple[Optional[str], 
         lines = [l for l in text.split("\n") if l.strip()]
         event = _detect_event_code(lines, tname)
         if event not in ["MS", "WS"]:
-            if len(debug_blocks) < 5:
-                debug_blocks.append({"event": event, "lines": lines[:8]})
             continue
 
         names = _extract_names_from_lines(lines)
         if len(names) < 2:
-            if len(debug_blocks) < 5:
-                debug_blocks.append({"event": event, "lines": lines[:8]})
             continue
         player_a = names[0]
         player_b = names[1]
