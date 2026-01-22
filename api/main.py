@@ -574,6 +574,7 @@ class EloRankingResponse(BaseModel):
     last_updated: str
     items: List[EloRankingEntry]
     total_count: int
+    debug: Optional[dict] = None
 
 
 def _map_category_code_from_text(text: str) -> Optional[str]:
@@ -1665,7 +1666,7 @@ async def get_abc_rankings(tier: str, category: str):
 
 
 @app.get("/rankings/{category}/elo", response_model=EloRankingResponse)
-async def get_elo_rankings(category: str):
+async def get_elo_rankings(category: str, debug: bool = Query(False)):
     """
     Elo-like 1v1 ranking for singles based on recent head-to-head results.
     - Uses 52-week sliding window (best-effort based on match row dates if available)
@@ -1710,6 +1711,13 @@ async def get_elo_rankings(category: str):
     total_delta = {pid: 0.0 for pid in players.keys()}
     match_count = {pid: 0 for pid in players.keys()}
     tournaments = {pid: set() for pid in players.keys()}
+    debug_info = {
+        "source_players": len(players),
+        "seen_matches": 0,
+        "simulated_matches": 0,
+        "upcoming_national": [],
+        "upcoming_abc": [],
+    }
 
     cutoff = datetime.now() - timedelta(weeks=52)
     seen_matches: set[str] = set()
@@ -1779,8 +1787,21 @@ async def get_elo_rankings(category: str):
         upcoming_abc = await _find_upcoming_abc_quebec_tournaments(limit=3)
         upcoming_nat = await _find_upcoming_national_tournaments(limit=3)
         upcoming = upcoming_nat + upcoming_abc
+        debug_info["upcoming_national"] = [
+            {"id": it.tournament_id, "name": it.name, "start": it.start_date, "draws": 0, "players": 0}
+            for it in upcoming_nat
+        ]
+        debug_info["upcoming_abc"] = [
+            {"id": it.tournament_id, "name": it.name, "start": it.start_date, "draws": 0, "players": 0}
+            for it in upcoming_abc
+        ]
         for t in upcoming:
             draws = await scrape_tournament_draws_ts(t.tournament_id)
+            # attach draw counts to debug
+            for bucket in ("upcoming_national", "upcoming_abc"):
+                for drow in debug_info[bucket]:
+                    if drow["id"] == t.tournament_id:
+                        drow["draws"] = len(draws)
             for d in draws:
                 # Match category by draw name
                 name_upper = (d.name or "").upper()
@@ -1790,6 +1811,10 @@ async def get_elo_rankings(category: str):
                     continue
 
                 draw_players = await _fetch_draw_players(d.url)
+                for bucket in ("upcoming_national", "upcoming_abc"):
+                    for drow in debug_info[bucket]:
+                        if drow["id"] == t.tournament_id:
+                            drow["players"] += len(draw_players)
                 if len(draw_players) < 2:
                     continue
 
@@ -1825,7 +1850,9 @@ async def get_elo_rankings(category: str):
                     match_count[pid_b] += 1
                     tournaments[pid_a].add(t.name or "")
                     tournaments[pid_b].add(t.name or "")
+                    debug_info["simulated_matches"] += 1
 
+    debug_info["seen_matches"] = len(seen_matches)
     rows: List[EloRankingEntry] = []
     for pid, pname in players.items():
         mc = match_count[pid]
@@ -1857,6 +1884,7 @@ async def get_elo_rankings(category: str):
         last_updated=datetime.now().isoformat(),
         items=items,
         total_count=len(items),
+        debug=debug_info if debug else None,
     )
     cache[cache_key] = (resp, datetime.now())
     return resp
