@@ -3,7 +3,7 @@ BCR API - Version qui FONCTIONNE avec les vraies données
 Utilise les URLs directes pour chaque catégorie
 """
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -15,10 +15,126 @@ import re
 import urllib.parse
 import os
 import json
+import csv
+import io
 import uuid
+import time
+import logging
+import hmac
+import hashlib
 from media_storage import build_media_storage
 
 app = FastAPI(title="BCR API", version="3.0.0")
+
+# --- Logging / Monitoring ---
+LOG_LEVEL = (os.getenv("BCR_LOG_LEVEL") or "INFO").strip().upper()
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("bcr.api")
+
+_sentry_dsn = (os.getenv("SENTRY_DSN") or "").strip()
+if _sentry_dsn:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+
+        def _parse_float_env(name: str, default: float) -> float:
+            raw = (os.getenv(name) or "").strip()
+            try:
+                return float(raw) if raw else default
+            except ValueError:
+                return default
+
+        sentry_sdk.init(
+            dsn=_sentry_dsn,
+            integrations=[FastApiIntegration()],
+            traces_sample_rate=_parse_float_env("SENTRY_TRACES_SAMPLE_RATE", 0.0),
+            environment=(os.getenv("BCR_ENV") or "production").strip(),
+            release=(os.getenv("BCR_RELEASE") or None),
+        )
+        logger.info("sentry enabled")
+    except Exception:
+        logger.exception("failed to initialize sentry")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.exception(
+            "request failed method=%s path=%s duration_ms=%s",
+            request.method,
+            request.url.path,
+            duration_ms,
+        )
+        raise
+    duration_ms = int((time.perf_counter() - start) * 1000)
+    logger.info(
+        "request completed method=%s path=%s status=%s duration_ms=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
+    return response
+
+# --- Basic auth / abuse protection for write endpoints ---
+MEDIA_API_KEY = (os.getenv("BCR_MEDIA_API_KEY") or "").strip()
+SELF_HMAC_SECRET = (os.getenv("BCR_SELF_HMAC_SECRET") or "").strip()
+RATE_LIMIT_WRITE_PER_MIN = int((os.getenv("BCR_RATE_LIMIT_WRITE_PER_MIN") or "30").strip() or "30")
+
+_rate_limit_state: dict[tuple[str, str], list[float]] = {}
+
+
+def _client_ip(request: Request) -> str:
+    # Trust proxy headers only if you control the proxy; Render sets X-Forwarded-For.
+    xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return xff or (request.client.host if request.client else "unknown")
+
+
+def _enforce_rate_limit(request: Request, bucket: str, limit: int = RATE_LIMIT_WRITE_PER_MIN, window_sec: int = 60) -> None:
+    if limit <= 0:
+        return
+    ip = _client_ip(request)
+    key = (bucket, ip)
+    now = time.time()
+    recent = [ts for ts in _rate_limit_state.get(key, []) if now - ts < window_sec]
+    if len(recent) >= limit:
+        raise HTTPException(status_code=429, detail="Trop de requêtes, réessayez plus tard.")
+    recent.append(now)
+    _rate_limit_state[key] = recent
+
+
+def _require_media_key(request: Request) -> None:
+    if not MEDIA_API_KEY:
+        raise HTTPException(status_code=503, detail="Clé média non configurée.")
+    key = (request.headers.get("x-api-key") or "").strip()
+    if not key or key != MEDIA_API_KEY:
+        raise HTTPException(status_code=401, detail="Clé média invalide.")
+
+
+def _compute_self_signature(player_id: str, actor_id: str, action: str) -> str:
+    msg = f"{player_id}:{actor_id}:{action}".encode("utf-8")
+    return hmac.new(SELF_HMAC_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+
+def _require_self_signature(request: Request, player_id: str, actor_id: str, action: str) -> None:
+    if not SELF_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="Secret self non configuré.")
+    provided_actor = (request.headers.get("x-self-id") or "").strip()
+    provided_sig = (request.headers.get("x-self-signature") or "").strip()
+    if not provided_actor or not provided_sig:
+        raise HTTPException(status_code=401, detail="Signature manquante.")
+    if provided_actor != actor_id:
+        raise HTTPException(status_code=401, detail="Identité self invalide.")
+    expected = _compute_self_signature(player_id=player_id, actor_id=actor_id, action=action)
+    if not hmac.compare_digest(provided_sig, expected):
+        raise HTTPException(status_code=401, detail="Signature invalide.")
 
 # --- Production-friendly config (via env vars) ---
 # Platforms like Render/Fly/Railway inject PORT; we use it in Docker CMD.
@@ -65,6 +181,8 @@ class RankingEntry(BaseModel):
     province: Optional[str] = None
     previous_rank: Optional[int] = None
     player_id: Optional[str] = None
+    partner_name: Optional[str] = None
+    partner_player_id: Optional[str] = None
 
 class RankingResponse(BaseModel):
     category: str
@@ -102,6 +220,7 @@ CACHE_DURATION = timedelta(hours=1)
 ABC_URL = "https://www.badmintonquebec.com/classement-elite-abc-2025-2026"
 BADMINTON_CANADA_HOME = "https://www.badminton.ca"
 BADMINTON_CANADA_NEWS_FEED = "https://www.badminton.ca/newsfeed/0/"
+NEWS_SHEET_CSV_URL = (os.getenv("BCR_NEWS_SHEET_CSV_URL") or "").strip()
 
 # Simple FR/EN scoring to keep only French news in /news
 _FR_TOKENS = {
@@ -164,6 +283,32 @@ def _is_likely_french(text: str) -> bool:
     fr, en, accents = _lang_score(text)
     return accents or (fr > en)
 
+
+def _normalize_doubles_player_name(raw: str) -> str:
+    """
+    Try to split concatenated doubles names like "Daniel LeungTimothy Lock"
+    into "Daniel Leung / Timothy Lock".
+    """
+    name = (raw or "").strip()
+    if not name:
+        return name
+    if "/" in name:
+        return name
+
+    # Insert spaces between lowercase->uppercase transitions (supports accents).
+    name = re.sub(r"(?<=[a-zà-ÿ])(?=[A-ZÀ-Ý])", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    parts = name.split(" ")
+    if len(parts) < 2:
+        return name
+
+    mid = max(1, len(parts) // 2)
+    left = " ".join(parts[:mid]).strip()
+    right = " ".join(parts[mid:]).strip()
+    if left and right:
+        return f"{left} / {right}"
+    return name
+
 # URLs directes pour chaque catégorie
 CATEGORY_URLS = {
     "MS": "https://badmintoncanada.tournamentsoftware.com/ranking/category.aspx?id=49797&category=151",
@@ -201,6 +346,25 @@ async def scrape_rankings(category: str) -> List[RankingEntry]:
         rankings = []
         
         # Skipper les 2 premières lignes (titre + en-têtes)
+        name_to_id_cache: dict[str, str] = {}
+
+        async def _resolve_player_id_by_name(name: Optional[str]) -> Optional[str]:
+            q = (name or "").strip()
+            if len(q) < 2:
+                return None
+            if q in name_to_id_cache:
+                return name_to_id_cache[q]
+            try:
+                matches = await search_players(q, limit=1)
+                if matches:
+                    pid = matches[0].player_id
+                    if pid:
+                        name_to_id_cache[q] = pid
+                        return pid
+            except Exception:
+                return None
+            return None
+
         for row in rows[2:]:
             cells = row.find_all(['td', 'th'])
             
@@ -209,17 +373,24 @@ async def scrape_rankings(category: str) -> List[RankingEntry]:
             
             cell_texts = [c.get_text(strip=True) for c in cells]
 
-            # Extract player_id from anchor href like: player.aspx?id=49797&player=3484563
+            # Extract player ids + names from anchors (for doubles)
             player_id = None
+            partner_player_id = None
+            partner_name = None
+            anchor_infos = []
             try:
-                a = row.find("a", href=True)
-                if a:
+                for a in row.find_all("a", href=True):
                     href = a.get("href", "")
                     m = re.search(r"[?&]player=(\d+)", href)
-                    if m:
-                        player_id = m.group(1)
+                    if not m:
+                        continue
+                    pid = m.group(1)
+                    name_txt = a.get_text(" ", strip=True)
+                    if not name_txt:
+                        continue
+                    anchor_infos.append((pid, name_txt))
             except Exception:
-                player_id = None
+                anchor_infos = []
             
             # Trouver rang (premier nombre < 1000)
             rank = None
@@ -228,18 +399,46 @@ async def scrape_rankings(category: str) -> List[RankingEntry]:
                     rank = int(text)
                     break
             
-            # Trouver nom (première chaîne qui ressemble à un nom)
+            # Trouver nom (meilleur effort). Pour doubles, extraire les 2 joueurs si possible.
             player_name = None
-            for text in cell_texts:
-                if (len(text) > 2 and 
-                    not text.replace('.', '').replace(',', '').isdigit() and 
-                    not re.match(r'^[A-Z]{2}\d+$', text)):  # Pas un ID comme "ON13010"
-                    
-                    # Vérifier que c'est un nom (contient espace OU caractères alphabétiques > 50%)
-                    alpha_count = sum(c.isalpha() or c.isspace() for c in text)
-                    if alpha_count > len(text) * 0.5:
-                        player_name = text
-                        break
+            if category in ["MD", "WD", "XD"]:
+                # Use anchor infos when possible to get partner ids
+                if anchor_infos:
+                    seen = set()
+                    uniq = []
+                    for pid, n in anchor_infos:
+                        key = (pid, n)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        uniq.append((pid, n))
+                    if len(uniq) >= 2:
+                        player_id = uniq[0][0]
+                        partner_player_id = uniq[1][0]
+                        player_name = " / ".join([uniq[0][1], uniq[1][1]])
+                        partner_name = uniq[1][1]
+                    elif len(uniq) == 1:
+                        player_id = uniq[0][0]
+
+            # Fallback: première chaîne qui ressemble à un nom
+            if not player_name:
+                for text in cell_texts:
+                    if (len(text) > 2 and 
+                        not text.replace('.', '').replace(',', '').isdigit() and 
+                        not re.match(r'^[A-Z]{2}\d+$', text)):  # Pas un ID comme "ON13010"
+                        
+                        # Vérifier que c'est un nom (contient espace OU caractères alphabétiques > 50%)
+                        alpha_count = sum(c.isalpha() or c.isspace() for c in text)
+                        if alpha_count > len(text) * 0.5:
+                            player_name = text
+                            break
+
+            if player_name and category in ["MD", "WD", "XD"]:
+                player_name = _normalize_doubles_player_name(player_name)
+                if "/" in player_name and not partner_name:
+                    parts = [p.strip() for p in player_name.split("/") if p.strip()]
+                    if len(parts) >= 2:
+                        partner_name = parts[1]
             
             # Trouver points (nombre >= 1000)
             points = 0.0
@@ -253,13 +452,23 @@ async def scrape_rankings(category: str) -> List[RankingEntry]:
             
             # Ajouter si valide
             if rank and player_name:
+                # Best-effort partner id resolution if missing (doubles)
+                if category in ["MD", "WD", "XD"]:
+                    if not player_id:
+                        # Try resolve from first name part
+                        name_part = player_name.split("/")[0].strip() if "/" in player_name else player_name
+                        player_id = await _resolve_player_id_by_name(name_part)
+                    if partner_name and not partner_player_id:
+                        partner_player_id = await _resolve_player_id_by_name(partner_name)
                 rankings.append(RankingEntry(
                     rank=rank,
                     player_name=player_name,
                     points=points,
                     province="ON",  # TODO: extraire de la table
                     previous_rank=None,
-                    player_id=player_id
+                    player_id=player_id,
+                    partner_name=partner_name,
+                    partner_player_id=partner_player_id
                 ))
         
         print(f"✅ {len(rankings)} joueurs extraits")
@@ -345,6 +554,25 @@ class TournamentDrawsResponse(BaseModel):
     source: str
     last_updated: str
     draws: List[TournamentDrawItem]
+    total_count: int
+
+
+class EloRankingEntry(BaseModel):
+    rank: int
+    player_id: str
+    player_name: str
+    rating: float
+    avg_points_per_match: float
+    matches: int
+    tournaments: int
+    active: bool
+
+
+class EloRankingResponse(BaseModel):
+    category: str
+    scope: str
+    last_updated: str
+    items: List[EloRankingEntry]
     total_count: int
 
 
@@ -730,6 +958,35 @@ async def search_tournaments_ts(query: str, page: int = 1, limit: int = 25) -> L
 
     return items
 
+
+def _is_live_tournament(start_date: Optional[str], end_date: Optional[str], today: str) -> bool:
+    if not start_date:
+        return False
+    sd = start_date.split(" ")[0] if start_date else ""
+    ed = end_date.split(" ")[0] if end_date else sd
+    if not sd:
+        return False
+    return sd <= today <= (ed or sd)
+
+
+async def fetch_live_tournaments_ts(limit: int = 30) -> List[TournamentSearchItem]:
+    today = datetime.now().date().isoformat()
+    items: List[TournamentSearchItem] = []
+    seen_ids: set[str] = set()
+
+    # Scan letters until we collect enough live tournaments.
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        found = await search_tournaments_ts(query=letter, page=1, limit=25)
+        for it in found:
+            if it.tournament_id in seen_ids:
+                continue
+            if _is_live_tournament(it.start_date, it.end_date, today):
+                seen_ids.add(it.tournament_id)
+                items.append(it)
+                if len(items) >= limit:
+                    return items
+    return items
+
 async def scrape_tournament_draws_ts(tournament_id: str) -> List[TournamentDrawItem]:
     tid = (tournament_id or "").strip()
     if not re.match(r"^[0-9A-Fa-f\\-]{36}$", tid):
@@ -944,6 +1201,18 @@ async def scrape_abc_rankings(tier: str, category: str, limit: int = 20) -> List
             provinces = [g["province"] for g in group if g.get("province")]
             display_prov = provinces[0] if provinces else None
 
+            # Extract partner info when possible
+            partner_name = None
+            partner_player_id = None
+            if display_name and "/" in display_name:
+                parts = [p.strip() for p in display_name.split("/") if p.strip()]
+                if len(parts) >= 2:
+                    partner_name = parts[1]
+            if display_id and "/" in display_id:
+                parts = [p.strip() for p in display_id.split("/") if p.strip()]
+                if len(parts) >= 2:
+                    partner_player_id = parts[1]
+
             out.append(
                 RankingEntry(
                     rank=rank_idx,
@@ -952,6 +1221,8 @@ async def scrape_abc_rankings(tier: str, category: str, limit: int = 20) -> List
                     province=display_prov,
                     previous_rank=None,
                     player_id=display_id,
+                    partner_name=partner_name,
+                    partner_player_id=partner_player_id,
                 )
             )
     else:
@@ -1019,6 +1290,138 @@ async def scrape_badminton_canada_news(limit: int = 20) -> List[NewsItem]:
             fr_items.append(it)
     return fr_items[:limit]
 
+
+async def scrape_news_from_sheet(limit: int = 20) -> List[NewsItem]:
+    """
+    Read a public Google Sheet published as CSV.
+    Expected columns: title, url, image_url, excerpt, published
+    """
+    if not NEWS_SHEET_CSV_URL:
+        return []
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = await client.get(NEWS_SHEET_CSV_URL, headers=headers, follow_redirects=True)
+        resp.raise_for_status()
+
+    text = resp.text or ""
+    reader = csv.DictReader(io.StringIO(text))
+    items: List[NewsItem] = []
+    for row in reader:
+        title = (row.get("title") or "").strip()
+        url = (row.get("url") or "").strip()
+        if not title or not url:
+            continue
+        items.append(
+            NewsItem(
+                id=url,
+                title=title,
+                url=url,
+                image_url=(row.get("image_url") or "").strip() or None,
+                excerpt=(row.get("excerpt") or "").strip() or None,
+                published=(row.get("published") or "").strip() or None,
+            )
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _normalize_person_name(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+
+def _elo_expected(rating_a: float, rating_b: float) -> float:
+    # E = 1 / (1 + 10^((Rb - Ra)/400))
+    return 1.0 / (1.0 + (10.0 ** ((rating_b - rating_a) / 400.0)))
+
+
+def _k_factor(tournament_name: str) -> int:
+    t = (tournament_name or "").lower()
+    if "championship" in t or "championnat" in t:
+        return 100
+    if "national" in t or "nationaux" in t or "canadian" in t:
+        return 75
+    if "abc" in t or "provinc" in t or "quebec" in t:
+        return 50
+    # Default: treat as provincial-level
+    return 50
+
+
+def _try_parse_date(text: str) -> Optional[datetime]:
+    s = (text or "").strip()
+    if not s:
+        return None
+    # common patterns: YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(s[:10], fmt)
+        except Exception:
+            pass
+    return None
+
+
+async def _fetch_player_match_rows(player_id: str) -> List[dict]:
+    """
+    Best-effort scrape of recent matches from TournamentSoftware ranking player page.
+    Returns list of dicts: {tournament, opponent, result, score, date}
+    """
+    pid = str(player_id).strip()
+    if not pid or not re.match(r"^\d+$", pid):
+        return []
+    url = f"{TS_BASE}/ranking/player.aspx?id={RANKING_LIST_ID}&player={pid}"
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        html = resp.text or ""
+
+    soup = BeautifulSoup(html, "html.parser")
+    out: List[dict] = []
+    for tr in soup.select("tr"):
+        tds = tr.find_all("td")
+        if len(tds) < 4:
+            continue
+        cells = [td.get_text(" ", strip=True) for td in tds]
+        tournament = cells[0]
+        opponent = cells[1]
+        score = cells[2]
+        result_text = cells[3]
+
+        # require a score-ish pattern and W/L-ish token
+        score_ok = re.search(r"(\d+\s*-\s*\d+)", score or "") is not None
+        rlow = (result_text or "").strip().lower()
+        has_res = (rlow in ["w", "l"]) or ("win" in rlow) or ("loss" in rlow) or ("victoire" in rlow) or ("défaite" in rlow) or ("defaite" in rlow)
+        if not score_ok and not has_res:
+            continue
+
+        is_win = True
+        if rlow in ["l"] or "loss" in rlow or "défaite" in rlow or "defaite" in rlow:
+            is_win = False
+        elif rlow in ["w"] or "win" in rlow or "victoire" in rlow:
+            is_win = True
+        else:
+            # fallback: compare first/last number
+            parts = [p.strip() for p in re.split(r"\s*-\s*", score) if p.strip()]
+            a = int(parts[0]) if parts and parts[0].isdigit() else 0
+            b = int(parts[-1]) if parts and parts[-1].isdigit() else 0
+            is_win = a > b
+
+        # date: scan all cells for something parseable
+        dt = None
+        for c in cells:
+            dt = _try_parse_date(c)
+            if dt:
+                break
+        out.append({
+            "tournament": tournament,
+            "opponent": opponent,
+            "score": score,
+            "is_win": is_win,
+            "date": dt.isoformat() if dt else None,
+        })
+    return out
+
 @app.get("/")
 async def root():
     return {
@@ -1034,6 +1437,23 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
+@app.get("/rankings/{category}", response_model=RankingResponse)
+async def get_rankings(category: str, scope: str = "national", province: Optional[str] = None):
+    """
+    Backward-compatible endpoint used by the iOS app.
+    Supports scope=national. Other scopes return a clear error instead of 404.
+    """
+    scope_norm = (scope or "national").strip().lower()
+    if scope_norm in ["national", "nat"]:
+        return await get_national_rankings(category)
+    if scope_norm == "provincial":
+        raise HTTPException(
+            status_code=501,
+            detail="Le scope provincial n'est plus supporté par cette API."
+        )
+    raise HTTPException(status_code=400, detail="Scope invalide")
+
 
 @app.get("/rankings/{category}/national", response_model=RankingResponse)
 async def get_national_rankings(category: str):
@@ -1067,6 +1487,17 @@ async def get_national_rankings(category: str):
     cache[cache_key] = (response, datetime.now())
     
     return response
+
+
+@app.get("/rankings/{category}/provincial/{province}", response_model=RankingResponse)
+async def get_provincial_rankings(category: str, province: str):
+    """
+    Legacy endpoint kept to avoid 404s. Provincial rankings are no longer supported.
+    """
+    raise HTTPException(
+        status_code=501,
+        detail="Le classement provincial n'est plus supporté par cette API."
+    )
 
 @app.get("/abc/{tier}/{category}", response_model=RankingResponse)
 async def get_abc_rankings(tier: str, category: str):
@@ -1104,6 +1535,148 @@ async def get_abc_rankings(tier: str, category: str):
         print(f"❌ ABC erreur: {e}")
         raise HTTPException(status_code=500, detail="Erreur interne ABC")
 
+
+@app.get("/rankings/{category}/elo", response_model=EloRankingResponse)
+async def get_elo_rankings(category: str):
+    """
+    Elo-like 1v1 ranking for singles based on recent head-to-head results.
+    - Uses 52-week sliding window (best-effort based on match row dates if available)
+    - K-factor by tournament name: Championship=100, National=75, Provincial/ABC=50
+    - Final ordering by avg points per match
+    - Active if >= 3 distinct tournaments in window
+    Source players: union of National rankings + ABC tier A rankings (same category).
+    """
+    cat = (category or "").upper().strip()
+    if cat not in ["MS", "WS"]:
+        raise HTTPException(status_code=400, detail="Elo disponible seulement pour MS/WS (1 contre 1).")
+
+    cache_key = f"elo_{cat}"
+    if cache_key in cache:
+        data, timestamp = cache[cache_key]
+        if datetime.now() - timestamp < CACHE_DURATION:
+            return data
+
+    # Source player universe
+    national = await scrape_rankings(cat)
+    abc_a = await scrape_abc_rankings(tier="A", category=cat, limit=200)
+    players = {}
+    for it in (national + abc_a):
+        if it.player_id:
+            players[str(it.player_id)] = it.player_name
+
+    if not players:
+        resp = EloRankingResponse(
+            category=cat,
+            scope="elo",
+            last_updated=datetime.now().isoformat(),
+            items=[],
+            total_count=0,
+        )
+        cache[cache_key] = (resp, datetime.now())
+        return resp
+
+    name_to_id = {_normalize_person_name(n): pid for pid, n in players.items()}
+
+    # Elo computation
+    ratings = {pid: 1500.0 for pid in players.keys()}
+    total_delta = {pid: 0.0 for pid in players.keys()}
+    match_count = {pid: 0 for pid in players.keys()}
+    tournaments = {pid: set() for pid in players.keys()}
+
+    cutoff = datetime.now() - timedelta(weeks=52)
+    seen_matches: set[str] = set()
+
+    # Gather matches (best-effort) and apply updates once per unique match
+    for pid, pname in players.items():
+        rows = await _fetch_player_match_rows(pid)
+        for m in rows:
+            opp_name = _normalize_person_name(m.get("opponent") or "")
+            opp_id = name_to_id.get(opp_name)
+            if not opp_id:
+                continue
+            if opp_id == pid:
+                continue
+
+            # date handling
+            dt = None
+            if m.get("date"):
+                try:
+                    dt = datetime.fromisoformat(m["date"])
+                except Exception:
+                    dt = None
+            if dt and dt < cutoff:
+                continue
+
+            tournament_name = (m.get("tournament") or "").strip()
+            score = (m.get("score") or "").strip()
+
+            a, b = sorted([pid, opp_id])
+            key = f"{a}|{b}|{tournament_name}|{m.get('date') or ''}|{score}"
+            if key in seen_matches:
+                continue
+            seen_matches.add(key)
+
+            is_win = bool(m.get("is_win"))
+            # Determine direction: result is from pid perspective; if pid isn't the canonical "A",
+            # we may need to flip.
+            if pid != a:
+                # pid is b; flip perspective for canonical a
+                is_win = not is_win
+
+            ra = ratings[a]
+            rb = ratings[b]
+            e = _elo_expected(ra, rb)
+            result = 1.0 if is_win else 0.0
+            k = float(_k_factor(tournament_name))
+            delta_a = k * (result - e)
+            delta_b = -delta_a
+
+            ratings[a] = ra + delta_a
+            ratings[b] = rb + delta_b
+
+            total_delta[a] += delta_a
+            total_delta[b] += delta_b
+            match_count[a] += 1
+            match_count[b] += 1
+            if tournament_name:
+                tournaments[a].add(tournament_name)
+                tournaments[b].add(tournament_name)
+
+    rows: List[EloRankingEntry] = []
+    for pid, pname in players.items():
+        mc = match_count[pid]
+        avg = (total_delta[pid] / mc) if mc > 0 else 0.0
+        tcount = len(tournaments[pid])
+        active = tcount >= 3
+        rows.append(EloRankingEntry(
+            rank=0,  # filled after sorting actives
+            player_id=pid,
+            player_name=pname,
+            rating=float(ratings[pid]),
+            avg_points_per_match=float(avg),
+            matches=mc,
+            tournaments=tcount,
+            active=active,
+        ))
+
+    active_rows = [r for r in rows if r.active]
+    inactive_rows = [r for r in rows if not r.active]
+    active_rows.sort(key=lambda r: (r.avg_points_per_match, r.rating), reverse=True)
+    for i, r in enumerate(active_rows, start=1):
+        r.rank = i
+    # keep inactive after actives (rank = 0)
+
+    items = active_rows + inactive_rows
+    resp = EloRankingResponse(
+        category=cat,
+        scope="elo",
+        last_updated=datetime.now().isoformat(),
+        items=items,
+        total_count=len(items),
+    )
+    cache[cache_key] = (resp, datetime.now())
+    return resp
+
 @app.get("/news", response_model=NewsResponse)
 async def get_news():
     cache_key = "news_badmintonca_fr"
@@ -1114,9 +1687,14 @@ async def get_news():
             return data
 
     try:
-        items = await scrape_badminton_canada_news(limit=20)
+        # Prefer Google Sheet if configured
+        items = await scrape_news_from_sheet(limit=20)
+        source = NEWS_SHEET_CSV_URL or "badminton.ca"
+        if not items:
+            items = await scrape_badminton_canada_news(limit=20)
+            source = "badminton.ca"
         response = NewsResponse(
-            source="badminton.ca",
+            source=source,
             last_updated=datetime.now().isoformat(),
             items=items,
             total_count=len(items),
@@ -1128,6 +1706,32 @@ async def get_news():
     except Exception as e:
         print(f"❌ News erreur: {e}")
         raise HTTPException(status_code=500, detail="Erreur interne News")
+
+
+@app.get("/news/custom", response_model=NewsResponse)
+async def get_news_custom():
+    cache_key = "news_sheet_custom"
+    if cache_key in cache:
+        data, timestamp = cache[cache_key]
+        if datetime.now() - timestamp < CACHE_DURATION:
+            print(f"✅ Cache hit pour {cache_key}")
+            return data
+
+    try:
+        items = await scrape_news_from_sheet(limit=20)
+        response = NewsResponse(
+            source=NEWS_SHEET_CSV_URL or "sheet",
+            last_updated=datetime.now().isoformat(),
+            items=items,
+            total_count=len(items),
+        )
+        cache[cache_key] = (response, datetime.now())
+        return response
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Erreur HTTP News Sheet")
+    except Exception as e:
+        print(f"❌ News sheet erreur: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne News Sheet")
 
 
 @app.get("/media/photos/{player_id}", response_model=List[MediaPhoto])
@@ -1163,11 +1767,18 @@ async def upload_media_photo(
     player_id: str,
     file: UploadFile = File(...),
     added_by: str = Form("media"),
-    added_by_id: Optional[str] = Form(None)
+    added_by_id: Optional[str] = Form(None),
+    request: Request
 ):
+    _enforce_rate_limit(request, bucket="media_write")
     pid = str(player_id).strip()
     if not pid:
         raise HTTPException(status_code=400, detail="player_id invalide")
+    added_by = (added_by or "").strip().lower()
+
+    if added_by != "media":
+        raise HTTPException(status_code=403, detail="Seuls les médias peuvent ajouter des photos.")
+    _require_media_key(request)
 
     pdir = _media_player_dir(pid)
     os.makedirs(pdir, exist_ok=True)
@@ -1209,7 +1820,8 @@ async def upload_media_photo(
 async def delete_media_photo(
     player_id: str,
     photo_id: str,
-    added_by_id: Optional[str] = Query(None)
+    added_by_id: Optional[str] = Query(None),
+    request: Request
 ):
     """
     Deletes a media photo.
@@ -1233,16 +1845,18 @@ async def delete_media_photo(
     if not target:
         raise HTTPException(status_code=404, detail="Photo introuvable")
 
-    added_by = (target.get("added_by") or "").strip()
+    added_by = (target.get("added_by") or "").strip().lower()
     stored_uploader = (target.get("added_by_id") or "").strip()
     provided = str(added_by_id).strip() if added_by_id is not None else ""
 
     # Allow deletion when the caller proves they are the original uploader.
     # "media" uploads require matching added_by_id; "self" uploads also require matching added_by_id.
-    if added_by not in ["media", "self"]:
+    if added_by != "media":
         raise HTTPException(status_code=403, detail="Suppression non autorisée")
     if not provided or stored_uploader != provided:
         raise HTTPException(status_code=403, detail="Suppression non autorisée")
+    _enforce_rate_limit(request, bucket="media_delete")
+    _require_media_key(request)
 
     # Remove object (best-effort)
     object_key = (target.get("object_key") or "").strip()
@@ -1275,11 +1889,17 @@ async def get_media_avatar(player_id: str):
 @app.post("/media/avatar/{player_id}")
 async def upload_media_avatar(
     player_id: str,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    request: Request
 ):
     pid = str(player_id).strip()
     if not pid:
         raise HTTPException(status_code=400, detail="player_id invalide")
+    _enforce_rate_limit(request, bucket="media_avatar")
+    actor_id = (request.headers.get("x-self-id") or "").strip()
+    if not actor_id:
+        raise HTTPException(status_code=401, detail="Signature manquante.")
+    _require_self_signature(request, player_id=pid, actor_id=actor_id, action="upload_avatar")
 
     os.makedirs(MEDIA_AVATARS_DIR, exist_ok=True)
     file_name = f"avatar_{pid}.jpg"
@@ -1398,6 +2018,34 @@ async def tournaments_search(q: str):
     except Exception as e:
         print(f"❌ TS search erreur: {e}")
         raise HTTPException(status_code=500, detail="Erreur interne TS search")
+
+
+@app.get("/tournaments/live", response_model=TournamentSearchResponse)
+async def tournaments_live():
+    today = datetime.now().date().isoformat()
+    cache_key = f"ts_tournaments_live_{today}"
+    if cache_key in cache:
+        data, timestamp = cache[cache_key]
+        if datetime.now() - timestamp < CACHE_DURATION:
+            print(f"✅ Cache hit pour {cache_key}")
+            return data
+
+    try:
+        items = await fetch_live_tournaments_ts(limit=30)
+        resp = TournamentSearchResponse(
+            query="live",
+            source=f"{TS_BASE}/find (live {today})",
+            last_updated=datetime.now().isoformat(),
+            items=items,
+            total_count=len(items),
+        )
+        cache[cache_key] = (resp, datetime.now())
+        return resp
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Erreur HTTP TS live")
+    except Exception as e:
+        print(f"❌ TS live erreur: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne TS live")
 
 
 @app.get("/tournament/{tournament_id}/draws", response_model=TournamentDrawsResponse)
