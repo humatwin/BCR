@@ -1889,8 +1889,8 @@ async def get_media_avatar(player_id: str):
 @app.post("/media/avatar/{player_id}")
 async def upload_media_avatar(
     player_id: str,
+    request: Request,
     file: UploadFile = File(...),
-    request: Request
 ):
     pid = str(player_id).strip()
     if not pid:
