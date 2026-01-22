@@ -1361,6 +1361,134 @@ def _try_parse_date(text: str) -> Optional[datetime]:
     return None
 
 
+def _normalize_team_name(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip())
+
+
+def _seed_order_for_player(
+    player_id: Optional[str],
+    player_name: str,
+    national_seed: dict[str, int],
+    abc_seed: dict[str, int],
+    name_to_id: dict[str, str],
+) -> int:
+    if player_id and player_id in national_seed:
+        return national_seed[player_id]
+    if player_id and player_id in abc_seed:
+        return abc_seed[player_id]
+    norm = _normalize_person_name(player_name)
+    pid = name_to_id.get(norm)
+    if pid and pid in national_seed:
+        return national_seed[pid]
+    if pid and pid in abc_seed:
+        return abc_seed[pid]
+    return 9999
+
+
+async def _fetch_draw_players(draw_url: str) -> List[dict]:
+    """
+    Best-effort parse of draw page to extract player ids + names.
+    """
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = await client.get(draw_url, headers=headers)
+        resp.raise_for_status()
+        html = resp.text or ""
+
+    soup = BeautifulSoup(html, "html.parser")
+    players: List[dict] = []
+    seen = set()
+
+    for a in soup.select("a[href]"):
+        href = a.get("href") or ""
+        if "player=" not in href and "playerid=" not in href and "/player/" not in href:
+            continue
+        name = _normalize_team_name(a.get_text(" ", strip=True))
+        if not name or name.lower() == "bye":
+            continue
+
+        pid = None
+        m = re.search(r"[?&]player=([0-9]+)", href)
+        if not m:
+            m = re.search(r"[?&]playerid=([0-9]+)", href)
+        if not m:
+            m = re.search(r"/player/([0-9]+)", href)
+        if m:
+            pid = m.group(1)
+
+        key = (pid or "", name)
+        if key in seen:
+            continue
+        seen.add(key)
+        players.append({"player_id": pid, "player_name": name})
+
+    return players
+
+
+async def _find_upcoming_abc_quebec_tournaments(limit: int = 5) -> List[TournamentSearchItem]:
+    today = datetime.now().date().isoformat()
+    out: List[TournamentSearchItem] = []
+    seen_ids: set[str] = set()
+    queries = ["ABC Quebec", "ABC Québec", "ABC"]
+
+    for q in queries:
+        items = await search_tournaments_ts(query=q, page=1, limit=25)
+        for it in items:
+            if it.tournament_id in seen_ids:
+                continue
+            sd = (it.start_date or "").split(" ")[0] if it.start_date else ""
+            if not sd or sd < today:
+                continue
+            loc = (it.location or "").lower()
+            if q == "ABC":
+                # For generic query, keep only Quebec-ish locations
+                if "quebec" not in loc and "québec" not in loc and "qc" not in loc:
+                    continue
+            seen_ids.add(it.tournament_id)
+            out.append(it)
+            if len(out) >= limit:
+                return out
+
+    return out
+
+
+async def _find_upcoming_national_tournaments(limit: int = 5) -> List[TournamentSearchItem]:
+    today = datetime.now().date().isoformat()
+    out: List[TournamentSearchItem] = []
+    seen_ids: set[str] = set()
+    queries = ["National", "Nationaux", "Canadian", "Canada"]
+
+    for q in queries:
+        items = await search_tournaments_ts(query=q, page=1, limit=25)
+        for it in items:
+            if it.tournament_id in seen_ids:
+                continue
+            sd = (it.start_date or "").split(" ")[0] if it.start_date else ""
+            if not sd or sd < today:
+                continue
+            seen_ids.add(it.tournament_id)
+            out.append(it)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _pair_first_round(players: List[dict], seed_map: dict[str, int], abc_seed: dict[str, int], name_to_id: dict[str, str]) -> List[tuple[dict, dict]]:
+    ranked = []
+    for p in players:
+        seed = _seed_order_for_player(p.get("player_id"), p.get("player_name", ""), seed_map, abc_seed, name_to_id)
+        ranked.append((seed, p))
+    ranked.sort(key=lambda it: it[0])
+    ordered = [p for _, p in ranked]
+    pairs = []
+    i, j = 0, len(ordered) - 1
+    while i < j:
+        pairs.append((ordered[i], ordered[j]))
+        i += 1
+        j -= 1
+    return pairs
+
+
 async def _fetch_player_match_rows(player_id: str) -> List[dict]:
     """
     Best-effort scrape of recent matches from TournamentSoftware ranking player page.
@@ -1586,6 +1714,10 @@ async def get_elo_rankings(category: str):
     cutoff = datetime.now() - timedelta(weeks=52)
     seen_matches: set[str] = set()
 
+    # Build seed maps from rankings
+    national_seed = {str(r.player_id): int(r.rank) for r in national if r.player_id}
+    abc_seed = {str(r.player_id): int(r.rank) for r in abc_a if r.player_id}
+
     # Gather matches (best-effort) and apply updates once per unique match
     for pid, pname in players.items():
         rows = await _fetch_player_match_rows(pid)
@@ -1641,6 +1773,58 @@ async def get_elo_rankings(category: str):
             if tournament_name:
                 tournaments[a].add(tournament_name)
                 tournaments[b].add(tournament_name)
+
+    # If we couldn't compute from past matches, simulate from upcoming ABC Quebec draws.
+    if not seen_matches:
+        upcoming_abc = await _find_upcoming_abc_quebec_tournaments(limit=3)
+        upcoming_nat = await _find_upcoming_national_tournaments(limit=3)
+        upcoming = upcoming_nat + upcoming_abc
+        for t in upcoming:
+            draws = await scrape_tournament_draws_ts(t.tournament_id)
+            for d in draws:
+                # Match category by draw name
+                name_upper = (d.name or "").upper()
+                if cat == "MS" and not ("MS" in name_upper or "MEN" in name_upper or "HOMME" in name_upper):
+                    continue
+                if cat == "WS" and not ("WS" in name_upper or "WOMEN" in name_upper or "FEMME" in name_upper):
+                    continue
+
+                draw_players = await _fetch_draw_players(d.url)
+                if len(draw_players) < 2:
+                    continue
+
+                pairs = _pair_first_round(draw_players, national_seed, abc_seed, name_to_id)
+                for left, right in pairs:
+                    pid_a = left.get("player_id")
+                    pid_b = right.get("player_id")
+                    if not pid_a or not pid_b:
+                        continue
+                    if pid_a == pid_b:
+                        continue
+                    if pid_a not in ratings or pid_b not in ratings:
+                        continue
+
+                    # Predict winner: lower seed wins (based on national/ABC seeding).
+                    seed_a = _seed_order_for_player(pid_a, left.get("player_name", ""), national_seed, abc_seed, name_to_id)
+                    seed_b = _seed_order_for_player(pid_b, right.get("player_name", ""), national_seed, abc_seed, name_to_id)
+                    is_win = seed_a <= seed_b
+
+                    ra = ratings[pid_a]
+                    rb = ratings[pid_b]
+                    e = _elo_expected(ra, rb)
+                    result = 1.0 if is_win else 0.0
+                    k = float(_k_factor(t.name))
+                    delta_a = k * (result - e)
+                    delta_b = -delta_a
+
+                    ratings[pid_a] = ra + delta_a
+                    ratings[pid_b] = rb + delta_b
+                    total_delta[pid_a] += delta_a
+                    total_delta[pid_b] += delta_b
+                    match_count[pid_a] += 1
+                    match_count[pid_b] += 1
+                    tournaments[pid_a].add(t.name or "")
+                    tournaments[pid_b].add(t.name or "")
 
     rows: List[EloRankingEntry] = []
     for pid, pname in players.items():
