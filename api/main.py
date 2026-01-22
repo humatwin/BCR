@@ -1585,19 +1585,29 @@ def _extract_names_from_lines(lines: List[str]) -> List[str]:
     return out
 
 
-def _detect_event_code(lines: List[str]) -> Optional[str]:
+def _tournament_kind(name: Optional[str]) -> Optional[str]:
+    t = (name or "").lower()
+    if "abc" in t or "quebec" in t or "québec" in t:
+        return "abc"
+    if "national" in t or "nationaux" in t or "canadian" in t or "canada" in t:
+        return "national"
+    return None
+
+
+def _detect_event_code(lines: List[str], tournament_name: Optional[str]) -> Optional[str]:
     joined = " ".join(lines)
     joined = re.sub(r"\s+", " ", joined)
-    men_codes = [
-        "MSA", "MSB", "MSC", "MS",
-        "SMA", "SMB", "SMC", "SM",
-        "SIMPLE HOMMES", "MEN'S SINGLES", "MENS SINGLES",
-    ]
-    women_codes = [
-        "WSA", "WSB", "WSC", "WS",
-        "SFA", "SFB", "SFC", "SF",
-        "SIMPLE FEMMES", "WOMEN'S SINGLES", "WOMENS SINGLES",
-    ]
+    kind = _tournament_kind(tournament_name)
+    if kind == "abc":
+        men_codes = ["SMA", "SMB", "SMC"]
+        women_codes = ["SFA", "SFB", "SFC"]
+    elif kind == "national":
+        men_codes = ["SM"]
+        women_codes = ["SF"]
+    else:
+        # fallback: accept any singles codes
+        men_codes = ["MSA", "MSB", "MSC", "MS", "SMA", "SMB", "SMC", "SM"]
+        women_codes = ["WSA", "WSB", "WSC", "WS", "SFA", "SFB", "SFC", "SF"]
     for code in men_codes:
         if re.search(rf"\b{re.escape(code)}\b", joined, flags=re.IGNORECASE):
             return "MS"
@@ -1640,7 +1650,7 @@ async def _fetch_tournament_matches(tournament_id: str) -> tuple[Optional[str], 
 
         text = container.get_text("\n", strip=True)
         lines = [l for l in text.split("\n") if l.strip()]
-        event = _detect_event_code(lines)
+        event = _detect_event_code(lines, tname)
         if event not in ["MS", "WS"]:
             if len(debug_blocks) < 5:
                 debug_blocks.append({"event": event, "lines": lines[:8]})
