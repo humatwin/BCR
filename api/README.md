@@ -102,6 +102,31 @@ Voir le fichier `APIService.swift` pour l'implémentation côté iOS.
 - `BCR_MEDIA_BACKEND`: `local` (défaut) ou `s3`
 - `BCR_CORS_ORIGINS`: liste CSV d'origines autorisées (ex: `https://bcrapp.com,https://admin.bcrapp.com` ou `*`)
 - `BCR_CORS_ALLOW_CREDENTIALS`: `true/false` (par défaut `false`)
+- `BCR_LOG_LEVEL`: niveau de logs (ex: `INFO`, `WARNING`)
+- `SENTRY_DSN`: DSN Sentry pour le logging d'erreurs (optionnel)
+- `SENTRY_TRACES_SAMPLE_RATE`: 0.0 à 1.0 pour le monitoring de perf (optionnel)
+- `BCR_ENV`: environnement (ex: `production`, `staging`)
+- `BCR_RELEASE`: version/release (ex: `api@1.2.3`)
+- `BCR_MEDIA_API_KEY`: clé requise pour les actions "media" (uploads/suppressions)
+- `BCR_SELF_HMAC_SECRET`: secret HMAC pour sécuriser les actions "self"
+- `BCR_RATE_LIMIT_WRITE_PER_MIN`: limite d'écriture par IP (par défaut 30/min)
+- `BCR_NEWS_SHEET_CSV_URL`: URL CSV d'un Google Sheet public pour l'actualité
+
+### News via Google Sheet
+
+1. Crée un Google Sheet avec colonnes: `title`, `url`, `image_url`, `excerpt`, `published`
+2. Fichier → Partager → Publier sur le web → Format: **CSV**
+3. Mets l'URL CSV dans `BCR_NEWS_SHEET_CSV_URL`
+
+Endpoints:
+- `GET /news` → utilise le Sheet si configuré, sinon badminton.ca
+- `GET /news/custom` → force le Sheet
+
+### Production: URL HTTPS stable
+
+1. Déployer l'API sur un hébergeur qui fournit une URL HTTPS stable (Render, Fly.io, Railway, etc.).
+2. Configurer un domaine (ex: `https://api.bcrapp.com`) et pointer l'app iOS vers cette URL.
+3. Activer les logs et le monitoring (Sentry recommandé).
 
 #### Stockage S3/R2 (recommandé sur Render gratuit)
 
