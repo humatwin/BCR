@@ -22,6 +22,7 @@ import time
 import logging
 import hmac
 import hashlib
+import unicodedata
 from media_storage import build_media_storage
 
 app = FastAPI(title="BCR API", version="3.0.0")
@@ -1352,8 +1353,21 @@ async def scrape_news_from_sheet(limit: int = 20) -> List[NewsItem]:
     return items
 
 
+def _strip_accents(text: str) -> str:
+    if not text:
+        return ""
+    return "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
+
+
 def _normalize_person_name(name: str) -> str:
-    return re.sub(r"\s+", " ", (name or "").strip().lower())
+    raw = _strip_accents((name or "").strip().lower())
+    raw = re.sub(r"[^\w\s,]", " ", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    if "," in raw:
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        if len(parts) >= 2:
+            raw = f"{parts[1]} {parts[0]}".strip()
+    return raw
 
 
 def _elo_expected(rating_a: float, rating_b: float) -> float:
@@ -1424,6 +1438,7 @@ async def _fetch_draw_players(draw_url: str) -> List[dict]:
     players: List[dict] = []
     seen = set()
 
+    # First pass: anchors (most reliable for ids)
     for a in soup.select("a[href]"):
         href = a.get("href") or ""
         if "player=" not in href and "playerid=" not in href and "/player/" not in href:
@@ -1446,6 +1461,35 @@ async def _fetch_draw_players(draw_url: str) -> List[dict]:
             continue
         seen.add(key)
         players.append({"player_id": pid, "player_name": name})
+
+    if players:
+        return players
+
+    # Fallback: try common draw participant selectors (no ids)
+    text_candidates: List[str] = []
+    for sel in [
+        ".participant__name",
+        ".draw__participant",
+        ".draw__team",
+        ".team__name",
+        ".event-match__player",
+        ".match__player",
+        ".player",
+        ".player__name",
+    ]:
+        for el in soup.select(sel):
+            t = _normalize_team_name(el.get_text(" ", strip=True))
+            if t:
+                text_candidates.append(t)
+
+    for t in text_candidates:
+        if t.lower() == "bye":
+            continue
+        key = ("", t)
+        if key in seen:
+            continue
+        seen.add(key)
+        players.append({"player_id": None, "player_name": t})
 
     return players
 
@@ -1496,6 +1540,105 @@ async def _find_upcoming_national_tournaments(limit: int = 5) -> List[Tournament
             if len(out) >= limit:
                 return out
     return out
+
+
+def _extract_tournament_name_from_soup(soup: BeautifulSoup) -> Optional[str]:
+    for tag in ["h1", "h2", "h3"]:
+        el = soup.find(tag)
+        if el:
+            text = el.get_text(" ", strip=True)
+            if text:
+                return text
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    return title or None
+
+
+def _extract_names_from_lines(lines: List[str]) -> List[str]:
+    names: List[str] = []
+    for raw in lines:
+        t = raw.strip()
+        if not t:
+            continue
+        t = re.sub(r"\[[^\]]+\]", "", t).strip()  # remove seeds [3/4]
+        low = t.lower()
+        if low in ["h2h", "bye", "cancelled"]:
+            continue
+        if re.search(r"\b(round|groupe|group|final|semi|quarter|venue|court)\b", low):
+            continue
+        if re.search(r"\b(MSA|WSA|MS|WS|MD|WD|XD|DMB|DMC|DMA|DDA|DDC)\b", t):
+            continue
+        if re.search(r"\d", t):
+            # skip times / scores / venue numbers
+            continue
+        if len(t) < 3:
+            continue
+        names.append(t)
+    # de-dupe, preserve order
+    out = []
+    seen = set()
+    for n in names:
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    return out
+
+
+async def _fetch_tournament_matches(tournament_id: str) -> tuple[Optional[str], List[dict]]:
+    tid = (tournament_id or "").strip()
+    if not re.match(r"^[0-9A-Fa-f\\-]{36}$", tid):
+        return None, []
+    url = f"{TS_BASE}/tournament/{tid}/Matches"
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        html = resp.text or ""
+
+    soup = BeautifulSoup(html, "html.parser")
+    tname = _extract_tournament_name_from_soup(soup)
+
+    matchups: List[dict] = []
+    seen = set()
+
+    # Match cards often include "H2H" link/button; use it as anchor.
+    for node in soup.find_all(string=lambda s: s and "H2H" in s):
+        container = node.parent
+        for _ in range(4):
+            if not container or container.name in ["body", "html"]:
+                break
+            text = container.get_text("\n", strip=True)
+            if text and text.count("\n") >= 3:
+                break
+            container = container.parent
+        if not container:
+            continue
+
+        text = container.get_text("\n", strip=True)
+        event = None
+        m = re.search(r"\b(MSA|WSA)\b", text)
+        if m:
+            event = m.group(1)
+        if event not in ["MSA", "WSA"]:
+            continue
+
+        lines = [l for l in text.split("\n") if l.strip()]
+        names = _extract_names_from_lines(lines)
+        if len(names) < 2:
+            continue
+        player_a = names[0]
+        player_b = names[1]
+        key = (event, player_a, player_b)
+        if key in seen:
+            continue
+        seen.add(key)
+        matchups.append({
+            "event": event,
+            "player_a_name": player_a,
+            "player_b_name": player_b,
+        })
+
+    return tname, matchups
 
 
 def _pair_first_round(players: List[dict], seed_map: dict[str, int], abc_seed: dict[str, int], name_to_id: dict[str, str]) -> List[tuple[dict, dict]]:
@@ -1578,6 +1721,56 @@ async def _build_prediction_matchups(
                 )
             )
 
+    return matchups
+
+
+def _build_prediction_matchups_from_matches(
+    matches: List[dict],
+    tournament_name: str,
+    category: str,
+    national_seed: dict[str, int],
+    abc_seed: dict[str, int],
+    name_to_id: dict[str, str],
+) -> List[PredictionMatchup]:
+    matchups: List[PredictionMatchup] = []
+    event_code = "MSA" if category == "MS" else "WSA"
+    for m in matches:
+        if m.get("event") != event_code:
+            continue
+        name_a = m.get("player_a_name") or ""
+        name_b = m.get("player_b_name") or ""
+        pid_a = name_to_id.get(_normalize_person_name(name_a))
+        pid_b = name_to_id.get(_normalize_person_name(name_b))
+
+        seed_a = _seed_order_for_player(pid_a, name_a, national_seed, abc_seed, name_to_id)
+        seed_b = _seed_order_for_player(pid_b, name_b, national_seed, abc_seed, name_to_id)
+        ra = _seed_to_rating(seed_a)
+        rb = _seed_to_rating(seed_b)
+        e = _elo_expected(ra, rb)
+        k = float(_k_factor(tournament_name or "ABC"))
+
+        delta_a_win = k * (1.0 - e)
+        delta_a_loss = k * (0.0 - e)
+        delta_b_win = -delta_a_loss
+        delta_b_loss = -delta_a_win
+
+        matchups.append(
+            PredictionMatchup(
+                player_a_id=pid_a,
+                player_a_name=name_a,
+                player_b_id=pid_b,
+                player_b_name=name_b,
+                expected_a=float(e),
+                expected_b=float(1.0 - e),
+                delta_a_win=float(delta_a_win),
+                delta_a_loss=float(delta_a_loss),
+                delta_b_win=float(delta_b_win),
+                delta_b_loss=float(delta_b_loss),
+                k=float(k),
+                source=m.get("event") or "",
+                tournament_name=tournament_name or None,
+            )
+        )
     return matchups
 
 
@@ -2395,16 +2588,41 @@ async def tournament_predict(tournament_id: str, category: str = Query("MS")):
     abc_a = await scrape_abc_rankings(tier="A", category=cat, limit=200)
     national_seed = {str(r.player_id): int(r.rank) for r in national if r.player_id}
     abc_seed = {str(r.player_id): int(r.rank) for r in abc_a if r.player_id}
-    name_to_id = {_normalize_person_name(r.player_name): str(r.player_id) for r in national + abc_a if r.player_id}
+    name_to_id = {}
+    for r in national + abc_a:
+        if not r.player_id:
+            continue
+        base = _normalize_person_name(r.player_name)
+        if base:
+            name_to_id[base] = str(r.player_id)
+        # also index "Last First" without comma if needed
+        raw = _strip_accents((r.player_name or "").strip().lower())
+        raw = re.sub(r"[^\w\s,]", " ", raw)
+        raw = re.sub(r"\s+", " ", raw).strip()
+        if "," in raw:
+            parts = [p.strip() for p in raw.split(",") if p.strip()]
+            if len(parts) >= 2:
+                alt = f"{parts[0]} {parts[1]}".strip()
+                name_to_id[alt] = str(r.player_id)
 
-    matchups = await _build_prediction_matchups(
-        tournament_id=tid,
-        tournament_name="",
+    tname, matches = await _fetch_tournament_matches(tid)
+    matchups = _build_prediction_matchups_from_matches(
+        matches=matches,
+        tournament_name=tname or "",
         category=cat,
         national_seed=national_seed,
         abc_seed=abc_seed,
         name_to_id=name_to_id,
     )
+    if not matchups:
+        matchups = await _build_prediction_matchups(
+            tournament_id=tid,
+            tournament_name=tname or "",
+            category=cat,
+            national_seed=national_seed,
+            abc_seed=abc_seed,
+            name_to_id=name_to_id,
+        )
 
     return PredictionResponse(
         tournament_id=tid,
@@ -2429,7 +2647,21 @@ async def player_predictions(player_id: str, category: str = Query("MS")):
     abc_a = await scrape_abc_rankings(tier="A", category=cat, limit=200)
     national_seed = {str(r.player_id): int(r.rank) for r in national if r.player_id}
     abc_seed = {str(r.player_id): int(r.rank) for r in abc_a if r.player_id}
-    name_to_id = {_normalize_person_name(r.player_name): str(r.player_id) for r in national + abc_a if r.player_id}
+    name_to_id = {}
+    for r in national + abc_a:
+        if not r.player_id:
+            continue
+        base = _normalize_person_name(r.player_name)
+        if base:
+            name_to_id[base] = str(r.player_id)
+        raw = _strip_accents((r.player_name or "").strip().lower())
+        raw = re.sub(r"[^\w\s,]", " ", raw)
+        raw = re.sub(r"\s+", " ", raw).strip()
+        if "," in raw:
+            parts = [p.strip() for p in raw.split(",") if p.strip()]
+            if len(parts) >= 2:
+                alt = f"{parts[0]} {parts[1]}".strip()
+                name_to_id[alt] = str(r.player_id)
 
     player_name = None
     for r in national + abc_a:
@@ -2443,14 +2675,24 @@ async def player_predictions(player_id: str, category: str = Query("MS")):
 
     filtered: List[PredictionMatchup] = []
     for t in upcoming:
-        matchups = await _build_prediction_matchups(
-            tournament_id=t.tournament_id,
-            tournament_name=t.name,
+        tname, matches = await _fetch_tournament_matches(t.tournament_id)
+        matchups = _build_prediction_matchups_from_matches(
+            matches=matches,
+            tournament_name=tname or t.name,
             category=cat,
             national_seed=national_seed,
             abc_seed=abc_seed,
             name_to_id=name_to_id,
         )
+        if not matchups:
+            matchups = await _build_prediction_matchups(
+                tournament_id=t.tournament_id,
+                tournament_name=t.name,
+                category=cat,
+                national_seed=national_seed,
+                abc_seed=abc_seed,
+                name_to_id=name_to_id,
+            )
         for m in matchups:
             if m.player_a_id == pid or m.player_b_id == pid:
                 filtered.append(m)
