@@ -600,6 +600,7 @@ class PredictionResponse(BaseModel):
     last_updated: str
     matchups: List[PredictionMatchup]
     total_count: int
+    debug: Optional[dict] = None
 
 
 def _map_category_code_from_text(text: str) -> Optional[str]:
@@ -1584,6 +1585,28 @@ def _extract_names_from_lines(lines: List[str]) -> List[str]:
     return out
 
 
+def _detect_event_code(lines: List[str]) -> Optional[str]:
+    joined = " ".join(lines)
+    joined = re.sub(r"\s+", " ", joined)
+    men_codes = [
+        "MSA", "MSB", "MSC", "MS",
+        "SMA", "SMB", "SMC", "SM",
+        "SIMPLE HOMMES", "MEN'S SINGLES", "MENS SINGLES",
+    ]
+    women_codes = [
+        "WSA", "WSB", "WSC", "WS",
+        "SFA", "SFB", "SFC", "SF",
+        "SIMPLE FEMMES", "WOMEN'S SINGLES", "WOMENS SINGLES",
+    ]
+    for code in men_codes:
+        if re.search(rf"\b{re.escape(code)}\b", joined, flags=re.IGNORECASE):
+            return "MS"
+    for code in women_codes:
+        if re.search(rf"\b{re.escape(code)}\b", joined, flags=re.IGNORECASE):
+            return "WS"
+    return None
+
+
 async def _fetch_tournament_matches(tournament_id: str) -> tuple[Optional[str], List[dict]]:
     tid = (tournament_id or "").strip()
     if not re.match(r"^[0-9A-Fa-f\\-]{36}$", tid):
@@ -1600,6 +1623,7 @@ async def _fetch_tournament_matches(tournament_id: str) -> tuple[Optional[str], 
 
     matchups: List[dict] = []
     seen = set()
+    debug_blocks: List[dict] = []
 
     # Match cards often include "H2H" link/button; use it as anchor.
     for node in soup.find_all(string=lambda s: s and "H2H" in s):
@@ -1615,16 +1639,17 @@ async def _fetch_tournament_matches(tournament_id: str) -> tuple[Optional[str], 
             continue
 
         text = container.get_text("\n", strip=True)
-        event = None
-        m = re.search(r"\b(MSA|WSA)\b", text)
-        if m:
-            event = m.group(1)
-        if event not in ["MSA", "WSA"]:
+        lines = [l for l in text.split("\n") if l.strip()]
+        event = _detect_event_code(lines)
+        if event not in ["MS", "WS"]:
+            if len(debug_blocks) < 5:
+                debug_blocks.append({"event": event, "lines": lines[:8]})
             continue
 
-        lines = [l for l in text.split("\n") if l.strip()]
         names = _extract_names_from_lines(lines)
         if len(names) < 2:
+            if len(debug_blocks) < 5:
+                debug_blocks.append({"event": event, "lines": lines[:8]})
             continue
         player_a = names[0]
         player_b = names[1]
@@ -1637,7 +1662,6 @@ async def _fetch_tournament_matches(tournament_id: str) -> tuple[Optional[str], 
             "player_a_name": player_a,
             "player_b_name": player_b,
         })
-
     return tname, matchups
 
 
@@ -1733,9 +1757,8 @@ def _build_prediction_matchups_from_matches(
     name_to_id: dict[str, str],
 ) -> List[PredictionMatchup]:
     matchups: List[PredictionMatchup] = []
-    event_code = "MSA" if category == "MS" else "WSA"
     for m in matches:
-        if m.get("event") != event_code:
+        if m.get("event") != category:
             continue
         name_a = m.get("player_a_name") or ""
         name_b = m.get("player_b_name") or ""
@@ -2574,7 +2597,7 @@ async def tournament_draws(tournament_id: str):
 
 
 @app.get("/tournament/{tournament_id}/predict", response_model=PredictionResponse)
-async def tournament_predict(tournament_id: str, category: str = Query("MS")):
+async def tournament_predict(tournament_id: str, category: str = Query("MS"), debug: bool = Query(False)):
     cat = (category or "").upper().strip()
     if cat not in ["MS", "WS"]:
         raise HTTPException(status_code=400, detail="Prévisions disponibles seulement pour MS/WS (1 contre 1).")
@@ -2630,11 +2653,15 @@ async def tournament_predict(tournament_id: str, category: str = Query("MS")):
         last_updated=datetime.now().isoformat(),
         matchups=matchups,
         total_count=len(matchups),
+        debug={
+            "tournament_name": tname,
+            "matches_found": len(matches),
+        } if debug else None,
     )
 
 
 @app.get("/player/{player_id}/predictions", response_model=PredictionResponse)
-async def player_predictions(player_id: str, category: str = Query("MS")):
+async def player_predictions(player_id: str, category: str = Query("MS"), debug: bool = Query(False)):
     cat = (category or "").upper().strip()
     if cat not in ["MS", "WS"]:
         raise HTTPException(status_code=400, detail="Prévisions disponibles seulement pour MS/WS (1 contre 1).")
@@ -2707,6 +2734,10 @@ async def player_predictions(player_id: str, category: str = Query("MS")):
         last_updated=datetime.now().isoformat(),
         matchups=filtered,
         total_count=len(filtered),
+        debug={
+            "upcoming_count": len(upcoming),
+            "filtered_count": len(filtered),
+        } if debug else None,
     )
 
 @app.post("/cache/clear")
