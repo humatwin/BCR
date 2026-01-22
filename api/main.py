@@ -1765,10 +1765,10 @@ async def list_media_photos(player_id: str):
 @app.post("/media/photos/{player_id}", response_model=List[MediaPhoto])
 async def upload_media_photo(
     player_id: str,
+    request: Request,
     file: UploadFile = File(...),
     added_by: str = Form("media"),
     added_by_id: Optional[str] = Form(None),
-    request: Request
 ):
     _enforce_rate_limit(request, bucket="media_write")
     pid = str(player_id).strip()
@@ -1820,8 +1820,8 @@ async def upload_media_photo(
 async def delete_media_photo(
     player_id: str,
     photo_id: str,
+    request: Request,
     added_by_id: Optional[str] = Query(None),
-    request: Request
 ):
     """
     Deletes a media photo.
