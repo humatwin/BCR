@@ -577,6 +577,29 @@ class EloRankingResponse(BaseModel):
     debug: Optional[dict] = None
 
 
+class PredictionMatchup(BaseModel):
+    player_a_id: Optional[str] = None
+    player_a_name: str
+    player_b_id: Optional[str] = None
+    player_b_name: str
+    expected_a: float
+    expected_b: float
+    delta_a_win: float
+    delta_a_loss: float
+    delta_b_win: float
+    delta_b_loss: float
+    k: float
+    source: str
+
+
+class PredictionResponse(BaseModel):
+    tournament_id: str
+    category: str
+    last_updated: str
+    matchups: List[PredictionMatchup]
+    total_count: int
+
+
 def _map_category_code_from_text(text: str) -> Optional[str]:
     t = (text or "").strip().lower()
     if "men" in t and "single" in t:
@@ -1490,6 +1513,14 @@ def _pair_first_round(players: List[dict], seed_map: dict[str, int], abc_seed: d
     return pairs
 
 
+def _seed_to_rating(seed: int) -> float:
+    if seed <= 0 or seed >= 9999:
+        return 1500.0
+    # Simple mapping: higher seed => higher rating
+    rating = 2000.0 - (seed * 5.0)
+    return max(1200.0, min(2000.0, rating))
+
+
 async def _fetch_player_match_rows(player_id: str) -> List[dict]:
     """
     Best-effort scrape of recent matches from TournamentSoftware ranking player page.
@@ -2287,6 +2318,79 @@ async def tournament_draws(tournament_id: str):
     except Exception as e:
         print(f"❌ TS draws erreur: {e}")
         raise HTTPException(status_code=500, detail="Erreur interne TS draws")
+
+
+@app.get("/tournament/{tournament_id}/predict", response_model=PredictionResponse)
+async def tournament_predict(tournament_id: str, category: str = Query("MS")):
+    cat = (category or "").upper().strip()
+    if cat not in ["MS", "WS"]:
+        raise HTTPException(status_code=400, detail="Prévisions disponibles seulement pour MS/WS (1 contre 1).")
+
+    tid = (tournament_id or "").strip().upper()
+    if not re.match(r"^[0-9A-Fa-f\\-]{36}$", tid):
+        raise HTTPException(status_code=400, detail="tournament_id invalide")
+
+    # Seeds from national + ABC A
+    national = await scrape_rankings(cat)
+    abc_a = await scrape_abc_rankings(tier="A", category=cat, limit=200)
+    national_seed = {str(r.player_id): int(r.rank) for r in national if r.player_id}
+    abc_seed = {str(r.player_id): int(r.rank) for r in abc_a if r.player_id}
+    name_to_id = {_normalize_person_name(r.player_name): str(r.player_id) for r in national + abc_a if r.player_id}
+
+    draws = await scrape_tournament_draws_ts(tid)
+    matchups: List[PredictionMatchup] = []
+
+    for d in draws:
+        name_upper = (d.name or "").upper()
+        if cat == "MS" and not ("MS" in name_upper or "MEN" in name_upper or "HOMME" in name_upper):
+            continue
+        if cat == "WS" and not ("WS" in name_upper or "WOMEN" in name_upper or "FEMME" in name_upper):
+            continue
+
+        draw_players = await _fetch_draw_players(d.url)
+        if len(draw_players) < 2:
+            continue
+
+        pairs = _pair_first_round(draw_players, national_seed, abc_seed, name_to_id)
+        for left, right in pairs:
+            pid_a = left.get("player_id")
+            pid_b = right.get("player_id")
+            seed_a = _seed_order_for_player(pid_a, left.get("player_name", ""), national_seed, abc_seed, name_to_id)
+            seed_b = _seed_order_for_player(pid_b, right.get("player_name", ""), national_seed, abc_seed, name_to_id)
+            ra = _seed_to_rating(seed_a)
+            rb = _seed_to_rating(seed_b)
+            e = _elo_expected(ra, rb)
+            k = float(_k_factor(d.name))
+
+            delta_a_win = k * (1.0 - e)
+            delta_a_loss = k * (0.0 - e)
+            delta_b_win = -delta_a_loss
+            delta_b_loss = -delta_a_win
+
+            matchups.append(
+                PredictionMatchup(
+                    player_a_id=pid_a,
+                    player_a_name=left.get("player_name") or "",
+                    player_b_id=pid_b,
+                    player_b_name=right.get("player_name") or "",
+                    expected_a=float(e),
+                    expected_b=float(1.0 - e),
+                    delta_a_win=float(delta_a_win),
+                    delta_a_loss=float(delta_a_loss),
+                    delta_b_win=float(delta_b_win),
+                    delta_b_loss=float(delta_b_loss),
+                    k=float(k),
+                    source=d.name,
+                )
+            )
+
+    return PredictionResponse(
+        tournament_id=tid,
+        category=cat,
+        last_updated=datetime.now().isoformat(),
+        matchups=matchups,
+        total_count=len(matchups),
+    )
 
 @app.post("/cache/clear")
 async def clear_cache():
