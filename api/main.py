@@ -590,6 +590,7 @@ class PredictionMatchup(BaseModel):
     delta_b_loss: float
     k: float
     source: str
+    tournament_name: Optional[str] = None
 
 
 class PredictionResponse(BaseModel):
@@ -1521,6 +1522,65 @@ def _seed_to_rating(seed: int) -> float:
     return max(1200.0, min(2000.0, rating))
 
 
+async def _build_prediction_matchups(
+    tournament_id: str,
+    tournament_name: str,
+    category: str,
+    national_seed: dict[str, int],
+    abc_seed: dict[str, int],
+    name_to_id: dict[str, str],
+) -> List[PredictionMatchup]:
+    draws = await scrape_tournament_draws_ts(tournament_id)
+    matchups: List[PredictionMatchup] = []
+
+    for d in draws:
+        name_upper = (d.name or "").upper()
+        if category == "MS" and not ("MS" in name_upper or "MEN" in name_upper or "HOMME" in name_upper):
+            continue
+        if category == "WS" and not ("WS" in name_upper or "WOMEN" in name_upper or "FEMME" in name_upper):
+            continue
+
+        draw_players = await _fetch_draw_players(d.url)
+        if len(draw_players) < 2:
+            continue
+
+        pairs = _pair_first_round(draw_players, national_seed, abc_seed, name_to_id)
+        for left, right in pairs:
+            pid_a = left.get("player_id")
+            pid_b = right.get("player_id")
+            seed_a = _seed_order_for_player(pid_a, left.get("player_name", ""), national_seed, abc_seed, name_to_id)
+            seed_b = _seed_order_for_player(pid_b, right.get("player_name", ""), national_seed, abc_seed, name_to_id)
+            ra = _seed_to_rating(seed_a)
+            rb = _seed_to_rating(seed_b)
+            e = _elo_expected(ra, rb)
+            k = float(_k_factor(tournament_name or d.name))
+
+            delta_a_win = k * (1.0 - e)
+            delta_a_loss = k * (0.0 - e)
+            delta_b_win = -delta_a_loss
+            delta_b_loss = -delta_a_win
+
+            matchups.append(
+                PredictionMatchup(
+                    player_a_id=pid_a,
+                    player_a_name=left.get("player_name") or "",
+                    player_b_id=pid_b,
+                    player_b_name=right.get("player_name") or "",
+                    expected_a=float(e),
+                    expected_b=float(1.0 - e),
+                    delta_a_win=float(delta_a_win),
+                    delta_a_loss=float(delta_a_loss),
+                    delta_b_win=float(delta_b_win),
+                    delta_b_loss=float(delta_b_loss),
+                    k=float(k),
+                    source=d.name,
+                    tournament_name=tournament_name or None,
+                )
+            )
+
+    return matchups
+
+
 async def _fetch_player_match_rows(player_id: str) -> List[dict]:
     """
     Best-effort scrape of recent matches from TournamentSoftware ranking player page.
@@ -2337,52 +2397,14 @@ async def tournament_predict(tournament_id: str, category: str = Query("MS")):
     abc_seed = {str(r.player_id): int(r.rank) for r in abc_a if r.player_id}
     name_to_id = {_normalize_person_name(r.player_name): str(r.player_id) for r in national + abc_a if r.player_id}
 
-    draws = await scrape_tournament_draws_ts(tid)
-    matchups: List[PredictionMatchup] = []
-
-    for d in draws:
-        name_upper = (d.name or "").upper()
-        if cat == "MS" and not ("MS" in name_upper or "MEN" in name_upper or "HOMME" in name_upper):
-            continue
-        if cat == "WS" and not ("WS" in name_upper or "WOMEN" in name_upper or "FEMME" in name_upper):
-            continue
-
-        draw_players = await _fetch_draw_players(d.url)
-        if len(draw_players) < 2:
-            continue
-
-        pairs = _pair_first_round(draw_players, national_seed, abc_seed, name_to_id)
-        for left, right in pairs:
-            pid_a = left.get("player_id")
-            pid_b = right.get("player_id")
-            seed_a = _seed_order_for_player(pid_a, left.get("player_name", ""), national_seed, abc_seed, name_to_id)
-            seed_b = _seed_order_for_player(pid_b, right.get("player_name", ""), national_seed, abc_seed, name_to_id)
-            ra = _seed_to_rating(seed_a)
-            rb = _seed_to_rating(seed_b)
-            e = _elo_expected(ra, rb)
-            k = float(_k_factor(d.name))
-
-            delta_a_win = k * (1.0 - e)
-            delta_a_loss = k * (0.0 - e)
-            delta_b_win = -delta_a_loss
-            delta_b_loss = -delta_a_win
-
-            matchups.append(
-                PredictionMatchup(
-                    player_a_id=pid_a,
-                    player_a_name=left.get("player_name") or "",
-                    player_b_id=pid_b,
-                    player_b_name=right.get("player_name") or "",
-                    expected_a=float(e),
-                    expected_b=float(1.0 - e),
-                    delta_a_win=float(delta_a_win),
-                    delta_a_loss=float(delta_a_loss),
-                    delta_b_win=float(delta_b_win),
-                    delta_b_loss=float(delta_b_loss),
-                    k=float(k),
-                    source=d.name,
-                )
-            )
+    matchups = await _build_prediction_matchups(
+        tournament_id=tid,
+        tournament_name="",
+        category=cat,
+        national_seed=national_seed,
+        abc_seed=abc_seed,
+        name_to_id=name_to_id,
+    )
 
     return PredictionResponse(
         tournament_id=tid,
@@ -2390,6 +2412,59 @@ async def tournament_predict(tournament_id: str, category: str = Query("MS")):
         last_updated=datetime.now().isoformat(),
         matchups=matchups,
         total_count=len(matchups),
+    )
+
+
+@app.get("/player/{player_id}/predictions", response_model=PredictionResponse)
+async def player_predictions(player_id: str, category: str = Query("MS")):
+    cat = (category or "").upper().strip()
+    if cat not in ["MS", "WS"]:
+        raise HTTPException(status_code=400, detail="Prévisions disponibles seulement pour MS/WS (1 contre 1).")
+
+    pid = (player_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="player_id invalide")
+
+    national = await scrape_rankings(cat)
+    abc_a = await scrape_abc_rankings(tier="A", category=cat, limit=200)
+    national_seed = {str(r.player_id): int(r.rank) for r in national if r.player_id}
+    abc_seed = {str(r.player_id): int(r.rank) for r in abc_a if r.player_id}
+    name_to_id = {_normalize_person_name(r.player_name): str(r.player_id) for r in national + abc_a if r.player_id}
+
+    player_name = None
+    for r in national + abc_a:
+        if str(r.player_id) == pid:
+            player_name = r.player_name
+            break
+
+    upcoming_abc = await _find_upcoming_abc_quebec_tournaments(limit=5)
+    upcoming_nat = await _find_upcoming_national_tournaments(limit=5)
+    upcoming = upcoming_nat + upcoming_abc
+
+    filtered: List[PredictionMatchup] = []
+    for t in upcoming:
+        matchups = await _build_prediction_matchups(
+            tournament_id=t.tournament_id,
+            tournament_name=t.name,
+            category=cat,
+            national_seed=national_seed,
+            abc_seed=abc_seed,
+            name_to_id=name_to_id,
+        )
+        for m in matchups:
+            if m.player_a_id == pid or m.player_b_id == pid:
+                filtered.append(m)
+            elif player_name:
+                norm = _normalize_person_name(player_name)
+                if _normalize_person_name(m.player_a_name) == norm or _normalize_person_name(m.player_b_name) == norm:
+                    filtered.append(m)
+
+    return PredictionResponse(
+        tournament_id=pid,
+        category=cat,
+        last_updated=datetime.now().isoformat(),
+        matchups=filtered,
+        total_count=len(filtered),
     )
 
 @app.post("/cache/clear")
